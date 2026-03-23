@@ -3,6 +3,10 @@ require("dotenv").config();
 // Set timezone to Philippine Time (Asia/Manila) for all Node.js operations
 process.env.TZ = 'Asia/Manila';
 
+// Force IPv4 DNS resolution (fixes ENETUNREACH on Railway's IPv6)
+const dns = require('dns');
+dns.setDefaultResultOrder('ipv4first');
+
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -188,7 +192,6 @@ process.on('uncaughtException', (err) => {
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('💥 UNHANDLED REJECTION at:', promise, 'reason:', reason);
-  process.exit(1);
 });
 
 // Start server
