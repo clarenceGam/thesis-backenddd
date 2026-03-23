@@ -180,5 +180,16 @@ app.use("/super-admin-payments", superAdminPaymentsRoutes);
 // Create default avatar on startup
 ensureDefaults();
 
+// Global error handlers
+process.on('uncaughtException', (err) => {
+  console.error('💥 UNCAUGHT EXCEPTION:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('💥 UNHANDLED REJECTION at:', promise, 'reason:', reason);
+  process.exit(1);
+});
+
 // Start server
 app.listen(PORT, () => console.log("Server running on port " + PORT));
