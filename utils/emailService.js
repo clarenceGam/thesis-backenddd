@@ -14,6 +14,14 @@ const transporter = nodemailer.createTransport({
   socketTimeout: 10000,
 });
 
+transporter.verify((error) => {
+  if (error) {
+    console.error('❌ SMTP connection failed:', error.message);
+  } else {
+    console.log('✅ SMTP connection verified - ready to send emails');
+  }
+});
+
 async function sendVerificationEmail(toEmail, firstName, token) {
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
   const verifyLink = `${frontendUrl}/verify-email?token=${token}`;
