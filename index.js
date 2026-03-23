@@ -44,6 +44,9 @@ const superAdminPaymentsRoutes = require("./routes/superAdminPayments");
 
 const app = express();
 
+// Trust proxy for Railway deployment (behind reverse proxy)
+app.set('trust proxy', 1);
+
 // ── Security headers (helmet) ──────────────────────────────────────────────
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow serving uploads cross-origin
