@@ -58,6 +58,9 @@ const ALLOWED_ORIGINS = [
   'http://127.0.0.1:5173',
 ].filter(Boolean);
 
+console.log('🔧 FRONTEND_URL:', process.env.FRONTEND_URL);
+console.log('🔧 ALLOWED_ORIGINS:', ALLOWED_ORIGINS);
+
 app.use(cors({
   origin: (origin, cb) => {
     if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
