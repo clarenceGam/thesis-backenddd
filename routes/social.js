@@ -1363,4 +1363,243 @@ router.delete("/bar-posts/:id", requireAuth, async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════
+// FEATURE 1: REPORT COMMENT / REPLY
+// ═══════════════════════════════════════════
+router.post("/comments/:commentId/report", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const commentId = Number(req.params.commentId);
+    const { reason, details, comment_type } = req.body || {};
+
+    if (!commentId) return res.status(400).json({ success: false, message: "Invalid comment ID" });
+    if (!reason) return res.status(400).json({ success: false, message: "Reason is required" });
+
+    const allowedReasons = [
+      "Spam or advertisement",
+      "Offensive or inappropriate",
+      "Harassment or bullying",
+      "False information",
+      "Other"
+    ];
+    if (!allowedReasons.includes(reason)) {
+      return res.status(400).json({ success: false, message: "Invalid reason" });
+    }
+
+    // Determine comment type and validate existence + not own comment
+    const cType = comment_type || "post_comment";
+    const validTypes = ["post_comment", "event_comment", "post_reply", "event_reply"];
+    if (!validTypes.includes(cType)) {
+      return res.status(400).json({ success: false, message: "Invalid comment_type" });
+    }
+
+    let commentOwnerId = null;
+    if (cType === "post_comment") {
+      const [rows] = await pool.query("SELECT user_id FROM bar_post_comments WHERE id = ? LIMIT 1", [commentId]);
+      if (!rows.length) return res.status(404).json({ success: false, message: "Comment not found" });
+      commentOwnerId = rows[0].user_id;
+    } else if (cType === "event_comment") {
+      const [rows] = await pool.query("SELECT user_id FROM event_comments WHERE id = ? LIMIT 1", [commentId]);
+      if (!rows.length) return res.status(404).json({ success: false, message: "Comment not found" });
+      commentOwnerId = rows[0].user_id;
+    } else if (cType === "post_reply") {
+      const [rows] = await pool.query("SELECT user_id FROM bar_comment_replies WHERE id = ? LIMIT 1", [commentId]);
+      if (!rows.length) return res.status(404).json({ success: false, message: "Reply not found" });
+      commentOwnerId = rows[0].user_id;
+    } else if (cType === "event_reply") {
+      const [rows] = await pool.query("SELECT user_id FROM event_comment_replies WHERE id = ? LIMIT 1", [commentId]);
+      if (!rows.length) return res.status(404).json({ success: false, message: "Reply not found" });
+      commentOwnerId = rows[0].user_id;
+    }
+
+    if (commentOwnerId === userId) {
+      return res.status(400).json({ success: false, message: "You cannot report your own comment" });
+    }
+
+    // Check for comment_reports table existence
+    const [tableCheck] = await pool.query(
+      `SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'comment_reports' LIMIT 1`
+    );
+    if (!tableCheck.length) {
+      // Auto-create the table if migration hasn't run
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS comment_reports (
+          id INT PRIMARY KEY AUTO_INCREMENT,
+          comment_id INT NOT NULL,
+          comment_type ENUM('post_comment','event_comment','post_reply','event_reply') NOT NULL DEFAULT 'post_comment',
+          reporter_id INT NOT NULL,
+          reason VARCHAR(100) NOT NULL,
+          details TEXT,
+          status ENUM('pending', 'reviewed', 'dismissed') DEFAULT 'pending',
+          reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (reporter_id) REFERENCES users(id) ON DELETE CASCADE,
+          UNIQUE KEY one_report_per_user (comment_id, comment_type, reporter_id),
+          INDEX idx_comment_reports_status (status),
+          INDEX idx_comment_reports_comment (comment_id, comment_type)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+      `);
+    }
+
+    await pool.query(
+      `INSERT INTO comment_reports (comment_id, comment_type, reporter_id, reason, details)
+       VALUES (?, ?, ?, ?, ?)`,
+      [commentId, cType, userId, reason, details ? String(details).substring(0, 200) : null]
+    );
+
+    return res.status(201).json({ success: true, message: "Report submitted. Thank you for helping keep the community safe." });
+  } catch (err) {
+    if (err.code === "ER_DUP_ENTRY") {
+      return res.status(409).json({ success: false, message: "You have already reported this comment." });
+    }
+    console.error("REPORT COMMENT ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.get("/comments/:commentId/report-status", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const commentId = Number(req.params.commentId);
+    const commentType = req.query.comment_type || "post_comment";
+
+    // Check table existence
+    const [tableCheck] = await pool.query(
+      `SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'comment_reports' LIMIT 1`
+    );
+    if (!tableCheck.length) {
+      return res.json({ success: true, reported: false });
+    }
+
+    const [rows] = await pool.query(
+      "SELECT id FROM comment_reports WHERE comment_id = ? AND comment_type = ? AND reporter_id = ? LIMIT 1",
+      [commentId, commentType, userId]
+    );
+
+    return res.json({ success: true, reported: rows.length > 0 });
+  } catch (err) {
+    console.error("REPORT STATUS ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ═══════════════════════════════════════════
+// FEATURE 2: GET TABLES FOR EVENT
+// ═══════════════════════════════════════════
+router.get("/events/:eventId/tables", async (req, res) => {
+  try {
+    const eventId = Number(req.params.eventId);
+    if (!eventId) return res.status(400).json({ success: false, message: "Invalid event ID" });
+
+    // Get event details
+    const [eventRows] = await pool.query(
+      `SELECT id, bar_id, event_date, start_time, end_time, entry_price
+       FROM bar_events
+       WHERE id = ? AND status = 'active' AND archived_at IS NULL
+       LIMIT 1`,
+      [eventId]
+    );
+    if (!eventRows.length) return res.status(404).json({ success: false, message: "Event not found" });
+
+    const event = eventRows[0];
+    const barId = event.bar_id;
+    const eventDate = event.event_date ? new Date(event.event_date).toISOString().slice(0, 10) : null;
+    // Use event start_time for availability check; normalize to HH:00:00
+    let eventTime = null;
+    if (event.start_time) {
+      const hh = String(event.start_time).slice(0, 2);
+      eventTime = `${hh}:00:00`;
+    }
+
+    if (!eventDate) {
+      return res.status(400).json({ success: false, message: "Event has no date" });
+    }
+
+    // Get all active tables for this bar
+    const [allTables] = await pool.query(
+      `SELECT id, bar_id, table_number, capacity, is_active, manual_status, image_path, price
+       FROM bar_tables
+       WHERE bar_id = ? AND is_active = 1
+       ORDER BY capacity ASC, table_number ASC`,
+      [barId]
+    );
+
+    // Get reserved table IDs for this event date/time
+    let reservedTableIds = [];
+    if (eventTime) {
+      const [reserved] = await pool.query(
+        `SELECT DISTINCT table_id FROM reservations
+         WHERE bar_id = ? AND reservation_date = ? AND reservation_time = ?
+           AND status IN ('pending','approved','paid','confirmed')`,
+        [barId, eventDate, eventTime]
+      );
+      reservedTableIds = reserved.map(r => r.table_id);
+    }
+
+    const tables = allTables.map(t => ({
+      ...t,
+      available: !reservedTableIds.includes(t.id) && String(t.manual_status || 'available').toLowerCase() === 'available',
+    }));
+
+    return res.json({
+      success: true,
+      data: tables,
+      event: {
+        id: event.id,
+        bar_id: barId,
+        event_date: eventDate,
+        start_time: event.start_time,
+        end_time: event.end_time,
+        entry_price: Number(event.entry_price || 0),
+      }
+    });
+  } catch (err) {
+    console.error("EVENT TABLES ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ═══════════════════════════════════════════
+// FEATURE 4: NOTIFICATION ENDPOINTS (additive)
+// ═══════════════════════════════════════════
+router.get("/notifications/unread-count", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const [[{ count }]] = await pool.query(
+      "SELECT COUNT(*) as count FROM notifications WHERE user_id = ? AND is_read = 0",
+      [userId]
+    );
+    return res.json({ success: true, count });
+  } catch (err) {
+    console.error("UNREAD COUNT ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.patch("/notifications/read-all", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    await pool.query("UPDATE notifications SET is_read = 1 WHERE user_id = ? AND is_read = 0", [userId]);
+    return res.json({ success: true, message: "All notifications marked as read" });
+  } catch (err) {
+    console.error("MARK ALL READ ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+router.patch("/notifications/:id/read", requireAuth, async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const notifId = Number(req.params.id);
+    if (!notifId) return res.status(400).json({ success: false, message: "Invalid notification ID" });
+
+    await pool.query("UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?", [notifId, userId]);
+    return res.json({ success: true, message: "Notification marked as read" });
+  } catch (err) {
+    console.error("MARK ONE READ ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 module.exports = router;

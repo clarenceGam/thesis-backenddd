@@ -155,8 +155,8 @@ router.get("/bars", async (req, res) => {
       params.push(`%${city}%`);
     }
     if (category) {
-      where.push("b.category = ?");
-      params.push(category);
+      where.push("LOWER(b.category) LIKE LOWER(?)");
+      params.push(`%${String(category).trim()}%`);
     }
     if (has_coords === "1") {
       where.push("b.latitude IS NOT NULL AND b.longitude IS NOT NULL");
