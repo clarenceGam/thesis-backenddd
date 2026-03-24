@@ -30,7 +30,13 @@ const postImageUpload = multer({
 function timeElapsed(datetime) {
   if (!datetime) return "";
   const now = new Date();
-  const ago = new Date(datetime);
+  // Normalize bare MySQL datetime strings (no TZ) to UTC to avoid Manila double-offset bug
+  let ago;
+  if (typeof datetime === 'string' && /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(datetime) && !/Z|[+-]\d{2}:?\d{2}$/.test(datetime)) {
+    ago = new Date(datetime.replace(' ', 'T') + 'Z');
+  } else {
+    ago = new Date(datetime);
+  }
   const diffMs = now - ago;
   const diffMin = Math.floor(diffMs / 60000);
   const diffHr = Math.floor(diffMs / 3600000);
@@ -516,7 +522,7 @@ router.post("/comments", requireAuth, async (req, res) => {
         comment,
         user_name: (userInfo.first_name || "") + " " + (userInfo.last_name || ""),
         profile_picture: userInfo.profile_picture || "assets/images/default-avatar.png",
-        created_at: new Date().toISOString().slice(0, 19).replace("T", " "),
+        created_at: new Date().toISOString(),
         parent_comment_id: parentCommentId,
         replies: []
       },
@@ -787,7 +793,7 @@ router.post("/comment-reply", requireAuth, async (req, res) => {
         reply,
         user_name: replierName,
         profile_picture: userInfo.profile_picture || "assets/images/default-avatar.png",
-        created_at: new Date().toISOString().slice(0, 19).replace("T", " ")
+        created_at: new Date().toISOString()
       },
       replyCount
     });
