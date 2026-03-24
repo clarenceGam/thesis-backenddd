@@ -3,6 +3,9 @@ require("dotenv").config();
 // Set timezone to Philippine Time (Asia/Manila) for all Node.js operations
 process.env.TZ = 'Asia/Manila';
 
+// Startup env check
+console.log('[ENV CHECK] GOOGLE_CLIENT_ID:', process.env.GOOGLE_CLIENT_ID ? 'SET ✅' : 'MISSING ❌');
+
 // Force IPv4 DNS resolution (fixes ENETUNREACH on Railway's IPv6)
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
