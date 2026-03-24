@@ -7,7 +7,7 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,
-  timezone: '+08:00', // Asia/Manila (Philippine Time)
+  timezone: 'Z', // Railway MySQL is UTC; 'Z' tells mysql2 to use Date.UTC() — avoids double-offset with TZ=Asia/Manila
 });
 
 module.exports = pool;
