@@ -6,6 +6,18 @@ process.env.TZ = 'Asia/Manila';
 // Force IPv4 DNS resolution (fixes ENETUNREACH on Railway's IPv6)
 const dns = require('dns');
 dns.setDefaultResultOrder('ipv4first');
+const origLookup = dns.lookup;
+dns.lookup = function(hostname, options, callback) {
+  if (typeof options === 'function') {
+    callback = options;
+    options = { family: 4 };
+  } else if (typeof options === 'number') {
+    options = { family: 4 };
+  } else {
+    options = Object.assign({}, options, { family: 4 });
+  }
+  origLookup.call(dns, hostname, options, callback);
+};
 
 const express = require("express");
 const cors = require("cors");
