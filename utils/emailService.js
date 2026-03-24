@@ -1,62 +1,25 @@
-const nodemailer = require('nodemailer');
-const dns = require('dns');
+const { Resend } = require('resend');
 
-dns.setDefaultResultOrder('ipv4first');
+const _resend = new Resend(process.env.RESEND_API_KEY);
+const _from = process.env.EMAIL_FROM || 'The Party Goers PH <onboarding@resend.dev>';
 
-const _smtpHostname = process.env.SMTP_HOST || 'smtp.gmail.com';
-const _smtpPort = parseInt(process.env.SMTP_PORT) || 587;
-let _transporter = null;
-
-async function getTransporter() {
-  if (_transporter) return _transporter;
-  let host = _smtpHostname;
-  try {
-    const addrs = await dns.promises.resolve4(_smtpHostname);
-    if (addrs.length > 0) {
-      host = addrs[0];
-      console.log(`📧 SMTP resolved to IPv4: ${_smtpHostname} → ${host}`);
-    }
-  } catch (e) {
-    console.warn(`⚠️  SMTP DNS resolve4 failed, using hostname directly: ${e.message}`);
-  }
-  _transporter = nodemailer.createTransport({
-    host,
-    port: _smtpPort,
-    secure: _smtpPort === 465,
-    requireTLS: _smtpPort !== 465,
-    family: 4,
-    tls: { servername: _smtpHostname },
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASSWORD,
-    },
-    connectionTimeout: 15000,
-    greetingTimeout: 15000,
-    socketTimeout: 15000,
-  });
-  return _transporter;
+if (!process.env.RESEND_API_KEY) {
+  console.warn('⚠️  RESEND_API_KEY is not set — emails will not be sent.');
+} else {
+  console.log('✅ Resend email service initialized');
 }
 
-getTransporter().then((t) => {
-  t.verify((error) => {
-    if (error) {
-      console.error('❌ SMTP connection failed:', error.message);
-    } else {
-      console.log('✅ SMTP connection verified - ready to send emails');
-    }
-  });
-}).catch((e) => console.error('❌ SMTP setup error:', e.message));
+async function _send(to, subject, html) {
+  const { data, error } = await _resend.emails.send({ from: _from, to, subject, html });
+  if (error) throw new Error(error.message);
+  return data;
+}
 
 async function sendVerificationEmail(toEmail, firstName, token) {
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
   const verifyLink = `${frontendUrl}/verify-email?token=${token}`;
 
-  const transporter = await getTransporter();
-  await transporter.sendMail({
-    from: `"The Party Goers PH" <${process.env.SMTP_USER}>`,
-    to: toEmail,
-    subject: 'Confirm your Party Goers account',
-    html: `
+  await _send(toEmail, 'Confirm your Party Goers account', `
 <!DOCTYPE html>
 <html>
 <head>
@@ -132,19 +95,13 @@ async function sendVerificationEmail(toEmail, firstName, token) {
   </table>
 </body>
 </html>
-    `.trim(),
-  });
+    `.trim());
 }
 
 async function sendBarApprovalEmail(toEmail, ownerName, businessName) {
   const loginUrl = process.env.BAR_OWNER_URL || 'https://barowner.thepartygoersph.com/login';
 
-  const transporter = await getTransporter();
-  await transporter.sendMail({
-    from: `"The Party Goers PH" <${process.env.SMTP_USER}>`,
-    to: toEmail,
-    subject: '🎉 Your Business Registration is Approved!',
-    html: `
+  await _send(toEmail, '🎉 Your Business Registration is Approved!', `
 <!DOCTYPE html>
 <html>
 <head>
@@ -238,20 +195,14 @@ async function sendBarApprovalEmail(toEmail, ownerName, businessName) {
   </table>
 </body>
 </html>
-    `.trim(),
-  });
+    `.trim());
 }
 
 async function sendPasswordResetEmail(toEmail, firstName, token) {
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
   const resetLink = `${frontendUrl}/reset-password?token=${token}`;
 
-  const transporter = await getTransporter();
-  await transporter.sendMail({
-    from: `"The Party Goers PH" <${process.env.SMTP_USER}>`,
-    to: toEmail,
-    subject: 'Reset your Party Goers password',
-    html: `
+  await _send(toEmail, 'Reset your Party Goers password', `
 <!DOCTYPE html>
 <html>
 <head>
@@ -321,8 +272,7 @@ async function sendPasswordResetEmail(toEmail, firstName, token) {
   </table>
 </body>
 </html>
-    `.trim(),
-  });
+    `.trim());
 }
 
 module.exports = { sendVerificationEmail, sendBarApprovalEmail, sendPasswordResetEmail };
