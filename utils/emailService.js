@@ -1,31 +1,57 @@
 const nodemailer = require('nodemailer');
+const dns = require('dns');
 
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || 'smtp.gmail.com',
-  port: parseInt(process.env.SMTP_PORT) || 465,
-  secure: true,
-  family: 4,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASSWORD,
-  },
-  connectionTimeout: 10000,
-  greetingTimeout: 10000,
-  socketTimeout: 10000,
-});
+dns.setDefaultResultOrder('ipv4first');
 
-transporter.verify((error) => {
-  if (error) {
-    console.error('❌ SMTP connection failed:', error.message);
-  } else {
-    console.log('✅ SMTP connection verified - ready to send emails');
+const _smtpHostname = process.env.SMTP_HOST || 'smtp.gmail.com';
+const _smtpPort = parseInt(process.env.SMTP_PORT) || 587;
+let _transporter = null;
+
+async function getTransporter() {
+  if (_transporter) return _transporter;
+  let host = _smtpHostname;
+  try {
+    const addrs = await dns.promises.resolve4(_smtpHostname);
+    if (addrs.length > 0) {
+      host = addrs[0];
+      console.log(`📧 SMTP resolved to IPv4: ${_smtpHostname} → ${host}`);
+    }
+  } catch (e) {
+    console.warn(`⚠️  SMTP DNS resolve4 failed, using hostname directly: ${e.message}`);
   }
-});
+  _transporter = nodemailer.createTransport({
+    host,
+    port: _smtpPort,
+    secure: _smtpPort === 465,
+    requireTLS: _smtpPort !== 465,
+    family: 4,
+    tls: { servername: _smtpHostname },
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASSWORD,
+    },
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
+    socketTimeout: 15000,
+  });
+  return _transporter;
+}
+
+getTransporter().then((t) => {
+  t.verify((error) => {
+    if (error) {
+      console.error('❌ SMTP connection failed:', error.message);
+    } else {
+      console.log('✅ SMTP connection verified - ready to send emails');
+    }
+  });
+}).catch((e) => console.error('❌ SMTP setup error:', e.message));
 
 async function sendVerificationEmail(toEmail, firstName, token) {
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
   const verifyLink = `${frontendUrl}/verify-email?token=${token}`;
 
+  const transporter = await getTransporter();
   await transporter.sendMail({
     from: `"The Party Goers PH" <${process.env.SMTP_USER}>`,
     to: toEmail,
@@ -113,6 +139,7 @@ async function sendVerificationEmail(toEmail, firstName, token) {
 async function sendBarApprovalEmail(toEmail, ownerName, businessName) {
   const loginUrl = process.env.BAR_OWNER_URL || 'https://barowner.thepartygoersph.com/login';
 
+  const transporter = await getTransporter();
   await transporter.sendMail({
     from: `"The Party Goers PH" <${process.env.SMTP_USER}>`,
     to: toEmail,
@@ -219,6 +246,7 @@ async function sendPasswordResetEmail(toEmail, firstName, token) {
   const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
   const resetLink = `${frontendUrl}/reset-password?token=${token}`;
 
+  const transporter = await getTransporter();
   await transporter.sendMail({
     from: `"The Party Goers PH" <${process.env.SMTP_USER}>`,
     to: toEmail,
