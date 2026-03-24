@@ -57,6 +57,7 @@ const payoutsRoutes = require("./routes/payouts");
 const paymentCheckRoutes = require("./routes/paymentCheck");
 const financialsRoutes = require("./routes/financials");
 const superAdminPaymentsRoutes = require("./routes/superAdminPayments");
+const feedWidgetsRoutes = require("./routes/feedWidgets");
 
 const app = express();
 
@@ -197,6 +198,8 @@ app.use("/payment-check", paymentCheckRoutes);
 app.use("/owner/financials", financialsRoutes);
 // Super Admin payment control
 app.use("/super-admin-payments", superAdminPaymentsRoutes);
+// Feed widgets (sidebar data for customer app)
+app.use("/feed-widgets", feedWidgetsRoutes);
 
 // Create default avatar on startup
 ensureDefaults();
