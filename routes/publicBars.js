@@ -296,8 +296,8 @@ router.get("/bars/:id/events", async (req, res) => {
               (SELECT COUNT(*) FROM event_comments ec WHERE ec.event_id = bar_events.id AND ec.status = 'active') AS comment_count,
               created_at, updated_at
        FROM bar_events
-       WHERE bar_id = ? AND status = 'active' AND event_date >= CURDATE()
-       ORDER BY event_date ASC, start_time ASC`,
+       WHERE bar_id = ? AND status = 'active'
+       ORDER BY event_date >= CURDATE() DESC, event_date ASC, start_time ASC`,
       [barId]
     );
 
