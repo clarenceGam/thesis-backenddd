@@ -1,18 +1,33 @@
-const { Resend } = require('resend');
+const axios = require('axios');
 
-const _resend = new Resend(process.env.RESEND_API_KEY);
-const _from = process.env.EMAIL_FROM || 'The Party Goers PH <onboarding@resend.dev>';
+const _brevoKey = process.env.BREVO_API_KEY;
+const _fromEmail = process.env.EMAIL_FROM || 'clarenceyt03@gmail.com';
+const _fromName = 'The Party Goers PH';
 
-if (!process.env.RESEND_API_KEY) {
-  console.warn('⚠️  RESEND_API_KEY is not set — emails will not be sent.');
+if (!_brevoKey) {
+  console.warn('⚠️  BREVO_API_KEY is not set — emails will not be sent.');
 } else {
-  console.log('✅ Resend email service initialized');
+  console.log('✅ Brevo email service initialized');
 }
 
 async function _send(to, subject, html) {
-  const { data, error } = await _resend.emails.send({ from: _from, to, subject, html });
-  if (error) throw new Error(error.message);
-  return data;
+  if (!_brevoKey) throw new Error('BREVO_API_KEY is not configured');
+  const response = await axios.post(
+    'https://api.brevo.com/v3/smtp/email',
+    {
+      sender: { name: _fromName, email: _fromEmail },
+      to: [{ email: to }],
+      subject,
+      htmlContent: html,
+    },
+    {
+      headers: {
+        'api-key': _brevoKey,
+        'content-type': 'application/json',
+      },
+    }
+  );
+  return response.data;
 }
 
 async function sendVerificationEmail(toEmail, firstName, token) {
