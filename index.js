@@ -101,10 +101,18 @@ app.use(cors({
 // ── Rate limiters ──────────────────────────────────────────────────────────
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20,                   // max 20 attempts per IP
+  max: 20,                   // max 20 attempts per IP (login/register only)
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many attempts. Please try again in 15 minutes.' },
+});
+
+const authSessionLimiter = rateLimit({
+  windowMs: 60 * 1000,       // 1 minute
+  max: 120,                  // generous limit for session checks (/me, /refresh, etc.)
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many requests. Please slow down.' },
 });
 
 const apiLimiter = rateLimit({
@@ -156,7 +164,14 @@ app.use("/db-test", async (req, res) => {
 // API Routes
 app.use("/admin", adminRoutes);
 app.use("/super-admin", superAdminRoutes);
-app.use("/auth", authLimiter, authRoutes); // auth endpoints get stricter rate limiting
+// Strict rate limit only on sensitive auth actions (login, register, password reset, google)
+app.use("/auth/login", authLimiter);
+app.use("/auth/register", authLimiter);
+app.use("/auth/forgot-password", authLimiter);
+app.use("/auth/reset-password", authLimiter);
+app.use("/auth/google", authLimiter);
+// Session checks (/me, /verify-email, etc.) use the generous limiter
+app.use("/auth", authSessionLimiter, authRoutes);
 app.use("/owner", ownerRoutes);
 app.use("/hr", hrRoutes);
 app.use("/hr", hrPermissionsRoutes);
