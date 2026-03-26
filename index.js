@@ -59,6 +59,10 @@ app.use(helmet({
 // ── CORS – allow local frontend origins ─────────────────────────────────────
 app.use(cors({
   origin: [
+    'https://superadmin.thepartygoers.fun',
+    'https://baropertions.thepartygoers.fun',
+    'https://api.partygoers.fun',
+    'https://thepartygoers.fun',
     'http://localhost:5173',
     'http://localhost:5174',
     'http://localhost:5175',
