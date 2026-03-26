@@ -508,9 +508,9 @@ router.post("/comments", requireAuth, async (req, res) => {
       const notifMessage = commenterName + ' commented: "' + comment.substring(0, 50) + (comment.length > 50 ? "..." : "") + '"';
       try {
         await pool.query(
-          `INSERT INTO notifications (user_id, type, title, message, related_id, related_type, post_id, comment_id, bar_id)
-           VALUES (?, 'new_comment', 'New Comment on Your Post', ?, ?, 'comment', ?, ?, ?)`,
-          [postData.owner_id, notifMessage, commentId, postId, commentId, postData.bar_id]
+          `INSERT INTO notifications (user_id, type, title, message, reference_id, reference_type)
+           VALUES (?, 'new_comment', 'New Comment on Your Post', ?, ?, 'comment')`,
+          [postData.owner_id, notifMessage, commentId]
         );
       } catch (_) {}
     }
@@ -689,9 +689,9 @@ router.post("/comment-reaction", requireAuth, async (req, res) => {
           const [u] = await pool.query("SELECT first_name, last_name FROM users WHERE id = ?", [userId]);
           const name = u.length ? u[0].first_name + " " + u[0].last_name : "Someone";
           await pool.query(
-            `INSERT INTO notifications (user_id, type, title, message, related_id, related_type, post_id, comment_id, bar_id)
-             VALUES (?, 'comment_reaction', 'New Reaction to Your Comment', ?, ?, 'reaction', ?, ?, ?)`,
-            [commentData.user_id, name + " reacted to your comment", ins.insertId, commentData.post_id, commentId, commentData.bar_id]
+            `INSERT INTO notifications (user_id, type, title, message, reference_id, reference_type)
+             VALUES (?, 'comment_reaction', 'New Reaction to Your Comment', ?, ?, 'reaction')`,
+            [commentData.user_id, name + " reacted to your comment", commentId]
           );
         } catch (_) {}
       }
@@ -765,9 +765,9 @@ router.post("/comment-reply", requireAuth, async (req, res) => {
       try {
         const msg = replierName + ' replied: "' + reply.substring(0, 50) + (reply.length > 50 ? "..." : "") + '"';
         await pool.query(
-          `INSERT INTO notifications (user_id, type, title, message, related_id, related_type, post_id, comment_id, bar_id)
-           VALUES (?, 'comment_reply', 'New Reply to Your Comment', ?, ?, 'reply', ?, ?, ?)`,
-          [commentData.user_id, msg, replyId, commentData.post_id, commentId, commentData.bar_id]
+          `INSERT INTO notifications (user_id, type, title, message, reference_id, reference_type)
+           VALUES (?, 'comment_reply', 'New Reply to Your Comment', ?, ?, 'reply')`,
+          [commentData.user_id, msg, replyId]
         );
       } catch (_) {}
     }
@@ -777,9 +777,9 @@ router.post("/comment-reply", requireAuth, async (req, res) => {
       try {
         const msg = replierName + ' replied: "' + reply.substring(0, 50) + (reply.length > 50 ? "..." : "") + '"';
         await pool.query(
-          `INSERT INTO notifications (user_id, type, title, message, related_id, related_type, post_id, comment_id, bar_id)
-           VALUES (?, 'reply_reply', 'New Reply to Your Reply', ?, ?, 'reply', ?, ?, ?)`,
-          [parentReplyUserId, msg, replyId, commentData.post_id, commentId, commentData.bar_id]
+          `INSERT INTO notifications (user_id, type, title, message, reference_id, reference_type)
+           VALUES (?, 'reply_reply', 'New Reply to Your Reply', ?, ?, 'reply')`,
+          [parentReplyUserId, msg, replyId]
         );
       } catch (_) {}
     }
@@ -855,9 +855,9 @@ router.post("/reply-reaction", requireAuth, async (req, res) => {
         const [u] = await pool.query("SELECT first_name, last_name FROM users WHERE id = ?", [userId]);
         const name = u.length ? u[0].first_name + " " + u[0].last_name : "Someone";
         await pool.query(
-          `INSERT INTO notifications (user_id, type, title, message, related_id, related_type, post_id, comment_id, bar_id)
-           VALUES (?, 'reply_reaction', 'New Reaction to Your Reply', ?, ?, 'reply_reaction', ?, ?, ?)`,
-          [replyData.user_id, name + " reacted to your reply", replyId, replyData.post_id, replyData.comment_id, replyData.bar_id]
+          `INSERT INTO notifications (user_id, type, title, message, reference_id, reference_type)
+           VALUES (?, 'reply_reaction', 'New Reaction to Your Reply', ?, ?, 'reply_reaction')`,
+          [replyData.user_id, name + " reacted to your reply", replyId]
         );
       } catch (_) {}
     }

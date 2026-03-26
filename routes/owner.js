@@ -2501,4 +2501,87 @@ router.get(
   }
 );
 
+// ═══════════════════════════════════════════════════════════════════
+// TAX CONFIGURATION (Bar Owner Panel — extensibility)
+// ═══════════════════════════════════════════════════════════════════
+
+// GET /owner/tax-config — Fetch bar's current tax configuration
+router.get("/tax-config", requireAuth, requireRole([USER_ROLES.BAR_OWNER]), async (req, res) => {
+  try {
+    const barId = req.user.bar_id;
+    if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+    const [rows] = await pool.query(
+      `SELECT tin, is_bir_registered, tax_type, tax_rate, tax_mode
+       FROM bars WHERE id = ? LIMIT 1`,
+      [barId]
+    );
+    if (!rows.length) return res.status(404).json({ success: false, message: "Bar not found" });
+
+    return res.json({ success: true, data: rows[0] });
+  } catch (err) {
+    console.error("GET TAX CONFIG ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// PUT /owner/tax-config — Update bar's tax configuration
+router.put("/tax-config", requireAuth, requireRole([USER_ROLES.BAR_OWNER]), async (req, res) => {
+  try {
+    const barId = req.user.bar_id;
+    if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+    const { tin, is_bir_registered, tax_type, tax_rate, tax_mode } = req.body || {};
+
+    if (tax_type && !["VAT", "NON_VAT"].includes(tax_type)) {
+      return res.status(400).json({ success: false, message: "tax_type must be VAT or NON_VAT" });
+    }
+    if (tax_mode && !["EXCLUSIVE", "INCLUSIVE"].includes(tax_mode)) {
+      return res.status(400).json({ success: false, message: "tax_mode must be EXCLUSIVE or INCLUSIVE" });
+    }
+    if (tax_rate !== undefined && (Number(tax_rate) < 0 || Number(tax_rate) > 100)) {
+      return res.status(400).json({ success: false, message: "tax_rate must be between 0 and 100" });
+    }
+
+    await pool.query(
+      `UPDATE bars SET
+         tin = COALESCE(?, tin),
+         is_bir_registered = COALESCE(?, is_bir_registered),
+         tax_type = COALESCE(?, tax_type),
+         tax_rate = COALESCE(?, tax_rate),
+         tax_mode = COALESCE(?, tax_mode),
+         updated_at = NOW()
+       WHERE id = ?`,
+      [
+        tin !== undefined ? tin : null,
+        is_bir_registered !== undefined ? (is_bir_registered ? 1 : 0) : null,
+        tax_type || null,
+        tax_rate !== undefined ? Number(tax_rate) : null,
+        tax_mode || null,
+        barId,
+      ]
+    );
+
+    logAudit(null, {
+      bar_id: barId,
+      user_id: req.user.id,
+      action: "UPDATE_TAX_CONFIG",
+      entity: "bars",
+      entity_id: barId,
+      details: { tin, is_bir_registered, tax_type, tax_rate, tax_mode },
+      ...auditContext(req),
+    });
+
+    const [updated] = await pool.query(
+      `SELECT tin, is_bir_registered, tax_type, tax_rate, tax_mode FROM bars WHERE id = ? LIMIT 1`,
+      [barId]
+    );
+
+    return res.json({ success: true, message: "Tax configuration updated", data: updated[0] });
+  } catch (err) {
+    console.error("PUT TAX CONFIG ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 module.exports = router;

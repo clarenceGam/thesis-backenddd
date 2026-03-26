@@ -551,6 +551,29 @@ router.post(
         ...auditContext(req),
       });
 
+      // Send notification to customer about successful reservation
+      try {
+        const [barInfo] = await pool.query("SELECT name FROM bars WHERE id = ? LIMIT 1", [barId]);
+        const barName = barInfo[0]?.name || "the bar";
+        const formattedDate = new Date(reservation_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+        const formattedTime = normalizedReservationTime.slice(0, 5);
+        
+        await pool.query(
+          `INSERT INTO notifications (user_id, type, title, message, reference_id, reference_type, is_read, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 0, NOW())`,
+          [
+            customerId,
+            'reservation_confirmed',
+            'Reservation Confirmed',
+            `Your reservation at ${barName} for ${formattedDate} at ${formattedTime} has been ${initialStatus === 'approved' ? 'confirmed' : 'submitted and is pending approval'}.`,
+            ins.insertId,
+            'reservation'
+          ]
+        );
+      } catch (notifErr) {
+        console.error("Failed to create reservation notification:", notifErr);
+      }
+
       return res.status(201).json({
         success: true,
         message: initialStatus === "approved" ? "Reservation auto-approved" : "Reservation created",

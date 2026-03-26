@@ -6,22 +6,6 @@ process.env.TZ = 'Asia/Manila';
 // Startup env check
 console.log('[ENV CHECK] GOOGLE_CLIENT_ID:', process.env.GOOGLE_CLIENT_ID ? 'SET ✅' : 'MISSING ❌');
 
-// Force IPv4 DNS resolution (fixes ENETUNREACH on Railway's IPv6)
-const dns = require('dns');
-dns.setDefaultResultOrder('ipv4first');
-const origLookup = dns.lookup;
-dns.lookup = function(hostname, options, callback) {
-  if (typeof options === 'function') {
-    callback = options;
-    options = { family: 4 };
-  } else if (typeof options === 'number') {
-    options = { family: 4 };
-  } else {
-    options = Object.assign({}, options, { family: 4 });
-  }
-  origLookup.call(dns, hostname, options, callback);
-};
-
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -61,11 +45,10 @@ const paymentCheckRoutes = require("./routes/paymentCheck");
 const financialsRoutes = require("./routes/financials");
 const superAdminPaymentsRoutes = require("./routes/superAdminPayments");
 const feedWidgetsRoutes = require("./routes/feedWidgets");
+const statsRoutes = require('./routes/stats');
+const customerOrdersRoutes = require('./routes/customerOrders');
 
 const app = express();
-
-// Trust proxy for Railway deployment (behind reverse proxy)
-app.set('trust proxy', 1);
 
 // ── Security headers (helmet) ──────────────────────────────────────────────
 app.use(helmet({
@@ -73,28 +56,18 @@ app.use(helmet({
   contentSecurityPolicy: false, // managed by frontend
 }));
 
-// ── CORS – restrict to known frontend origins ──────────────────────────────
-const _frontendUrl = process.env.FRONTEND_URL;
-const _wwwVariant = _frontendUrl
-  ? _frontendUrl.replace(/^(https?:\/\/)(?!www\.)/, '$1www.')
-  : null;
-const ALLOWED_ORIGINS = [
-  _frontendUrl,
-  _wwwVariant,
-  'https://tpgbarmanager.netlify.app',
-  'http://localhost:5173',
-  'http://localhost:4173',
-  'http://127.0.0.1:5173',
-].filter(Boolean);
-
-console.log('🔧 FRONTEND_URL:', process.env.FRONTEND_URL);
-console.log('🔧 ALLOWED_ORIGINS:', ALLOWED_ORIGINS);
-
+// ── CORS – allow local frontend origins ─────────────────────────────────────
 app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin || ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    cb(new Error('Not allowed by CORS'));
-  },
+  origin: [
+    'http://localhost:5173',
+    'http://localhost:5174',
+    'http://localhost:5175',
+    'http://localhost:4173',
+    'http://127.0.0.1:5173',
+    // Flutter web dev server (dynamic ports)
+    /^http:\/\/localhost:\d+$/,
+    /^http:\/\/127\.0\.0\.1:\d+$/,
+  ],
   credentials: true,
 }));
 
@@ -142,6 +115,29 @@ app.use("/health", (req, res) => {
     ok: true,
     message: "API is running",
   });
+});
+
+// PayMongo payment callback pages (shown after redirect)
+app.get("/payment/success", (req, res) => {
+  res.send(`<!DOCTYPE html><html><head><title>Payment Successful</title>
+    <style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0A0A0A;font-family:system-ui,sans-serif;color:#fff}
+    .card{text-align:center;padding:48px;border-radius:16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1)}
+    .icon{font-size:64px;margin-bottom:16px}h1{margin:0 0 8px;font-size:24px}p{color:#999;margin:0 0 24px;font-size:15px}
+    .btn{display:inline-block;padding:12px 32px;background:#CC0000;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px}</style></head>
+    <body><div class="card"><div class="icon">✅</div><h1>Payment Successful!</h1>
+    <p>Your reservation has been confirmed.<br>You can close this tab and return to the app.</p>
+    <a href="javascript:window.close()" class="btn">Close This Tab</a></div></body></html>`);
+});
+
+app.get("/payment/failed", (req, res) => {
+  res.send(`<!DOCTYPE html><html><head><title>Payment Failed</title>
+    <style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#0A0A0A;font-family:system-ui,sans-serif;color:#fff}
+    .card{text-align:center;padding:48px;border-radius:16px;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.1)}
+    .icon{font-size:64px;margin-bottom:16px}h1{margin:0 0 8px;font-size:24px}p{color:#999;margin:0 0 24px;font-size:15px}
+    .btn{display:inline-block;padding:12px 32px;background:#CC0000;color:#fff;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px}</style></head>
+    <body><div class="card"><div class="icon">❌</div><h1>Payment Failed</h1>
+    <p>Something went wrong with your payment.<br>You can close this tab and try again in the app.</p>
+    <a href="javascript:window.close()" class="btn">Close This Tab</a></div></body></html>`);
 });
 
 app.use("/db-test", async (req, res) => {
@@ -219,9 +215,31 @@ app.use("/owner/financials", financialsRoutes);
 app.use("/super-admin-payments", superAdminPaymentsRoutes);
 // Feed widgets (sidebar data for customer app)
 app.use("/feed-widgets", feedWidgetsRoutes);
+// Platform statistics
+app.use("/stats", statsRoutes);
+// Customer web ordering (tax-aware)
+app.use("/customer-orders", customerOrdersRoutes);
 
 // Create default avatar on startup
 ensureDefaults();
+
+// ── Reservation Reminder Scheduler ──
+// Send reminder notifications every 4 hours for reservations happening today
+const { sendTodayReservationReminders } = require('./utils/reservationReminders');
+
+// Run immediately on startup
+sendTodayReservationReminders().catch(err => {
+  console.error('[STARTUP] Failed to send initial reservation reminders:', err);
+});
+
+// Schedule to run every 4 hours (14400000 ms)
+setInterval(() => {
+  sendTodayReservationReminders().catch(err => {
+    console.error('[SCHEDULER] Failed to send reservation reminders:', err);
+  });
+}, 4 * 60 * 60 * 1000);
+
+console.log('✅ Reservation reminder scheduler initialized (runs every 4 hours)');
 
 // Global error handlers
 process.on('uncaughtException', (err) => {

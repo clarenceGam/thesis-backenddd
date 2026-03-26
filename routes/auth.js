@@ -345,6 +345,15 @@ router.post("/login", async (req, res) => {
       });
     }
 
+    // Detect Google-only accounts (password stored as empty string)
+    if (!user.password) {
+      return res.status(401).json({
+        success: false,
+        code: "GOOGLE_ACCOUNT",
+        message: "This account uses Google sign-in. Please use the 'Continue with Google' button to log in.",
+      });
+    }
+
     // Verify password
     const isValidPassword = await bcrypt.compare(password, user.password);
     if (!isValidPassword) {

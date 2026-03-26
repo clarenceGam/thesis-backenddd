@@ -98,7 +98,7 @@ router.get("/bars/trending", async (req, res) => {
 
     const [rows] = await pool.query(
       `SELECT b.id, b.name, b.description, b.address, b.city, b.state, b.zip_code,
-              b.phone, b.email, b.website, b.category, b.price_range, b.image_path,
+              b.contact_number AS phone, b.email, b.website, b.category, b.price_range, b.image_path,
               b.logo_path, b.video_path,
               b.logo_path AS bar_icon, b.video_path AS bar_gif,
               b.latitude, b.longitude, b.rating, b.review_count,
@@ -170,7 +170,7 @@ router.get("/bars", async (req, res) => {
 
     const [rows] = await pool.query(
       `SELECT b.id, b.name, b.description, b.address, b.city, b.state, b.zip_code,
-              b.phone, b.email, b.website, b.category, b.price_range, b.image_path,
+              b.contact_number AS phone, b.email, b.website, b.category, b.price_range, b.image_path,
               b.logo_path, b.video_path,
               b.logo_path AS bar_icon, b.video_path AS bar_gif,
               b.latitude, b.longitude, b.rating, b.review_count,
@@ -206,7 +206,7 @@ router.get("/bars/:id", async (req, res) => {
 
     const [rows] = await pool.query(
       `SELECT b.id, b.name, b.description, b.address, b.city, b.state, b.zip_code,
-              b.phone, b.email, b.website, b.category, b.price_range, b.image_path,
+              b.contact_number AS phone, b.email, b.website, b.category, b.price_range, b.image_path,
               b.logo_path, b.video_path,
               b.logo_path AS bar_icon, b.video_path AS bar_gif,
               b.latitude, b.longitude, b.rating, b.review_count,
@@ -289,11 +289,16 @@ router.get("/bars/:id/events", async (req, res) => {
     );
     if (!barCheck.length) return res.status(404).json({ success: false, message: "Bar not found" });
 
+    const userLikedSubquery = customerUserId 
+      ? `(SELECT COUNT(*) > 0 FROM event_likes el WHERE el.event_id = bar_events.id AND el.user_id = ${customerUserId}) AS user_liked`
+      : '0 AS user_liked';
+
     const [rows] = await pool.query(
       `SELECT id, bar_id, title, description, event_date, start_time, end_time,
               entry_price, max_capacity, current_bookings, status, image_url, image_path,
               (SELECT COUNT(*) FROM event_likes el WHERE el.event_id = bar_events.id) AS like_count,
               (SELECT COUNT(*) FROM event_comments ec WHERE ec.event_id = bar_events.id AND ec.status = 'active') AS comment_count,
+              ${userLikedSubquery},
               created_at, updated_at
        FROM bar_events
        WHERE bar_id = ? AND status = 'active'

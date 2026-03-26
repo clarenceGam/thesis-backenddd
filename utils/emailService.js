@@ -1,33 +1,43 @@
-const axios = require('axios');
+const nodemailer = require('nodemailer');
 
-const _brevoKey = process.env.BREVO_API_KEY;
-const _fromEmail = process.env.EMAIL_FROM || 'clarenceyt03@gmail.com';
+const _fromEmail = process.env.SMTP_USER || 'noreply@thepartygoersph.com';
 const _fromName = 'The Party Goers PH';
 
-if (!_brevoKey) {
-  console.warn('⚠️  BREVO_API_KEY is not set — emails will not be sent.');
+let transporter = null;
+
+if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASSWORD) {
+  transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: parseInt(process.env.SMTP_PORT || '587'),
+    secure: false,
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASSWORD,
+    },
+  });
+  console.log('✅ SMTP email service initialized');
 } else {
-  console.log('✅ Brevo email service initialized');
+  console.warn('⚠️  SMTP credentials not set — emails will be logged to console only.');
 }
 
 async function _send(to, subject, html) {
-  if (!_brevoKey) throw new Error('BREVO_API_KEY is not configured');
-  const response = await axios.post(
-    'https://api.brevo.com/v3/smtp/email',
-    {
-      sender: { name: _fromName, email: _fromEmail },
-      to: [{ email: to }],
+  if (!transporter) {
+    console.log(`📧 [EMAIL SKIPPED] To: ${to} | Subject: ${subject}`);
+    return;
+  }
+  
+  try {
+    await transporter.sendMail({
+      from: `"${_fromName}" <${_fromEmail}>`,
+      to,
       subject,
-      htmlContent: html,
-    },
-    {
-      headers: {
-        'api-key': _brevoKey,
-        'content-type': 'application/json',
-      },
-    }
-  );
-  return response.data;
+      html,
+    });
+    console.log(`✅ Email sent to ${to}: ${subject}`);
+  } catch (error) {
+    console.warn(`⚠️  Failed to send email to ${to}: ${error.message}`);
+    console.log(`📧 [EMAIL SKIPPED] To: ${to} | Subject: ${subject}`);
+  }
 }
 
 async function sendVerificationEmail(toEmail, firstName, token) {
