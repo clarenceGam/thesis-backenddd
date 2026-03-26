@@ -60,8 +60,8 @@ app.use(helmet({
 app.use(cors({
   origin: [
     'https://superadmin.thepartygoers.fun',
-    'https://baropertions.thepartygoers.fun',
-    'https://api.partygoers.fun',
+    'https://baroperations.thepartygoers.fun',
+    'https://api.thepartygoers.fun',
     'https://thepartygoers.fun',
     'http://localhost:5173',
     'http://localhost:5174',
