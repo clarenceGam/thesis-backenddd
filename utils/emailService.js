@@ -123,6 +123,76 @@ async function sendVerificationEmail(toEmail, firstName, token) {
     `.trim());
 }
 
+async function sendBarOwnerVerificationEmail(toEmail, firstName, token) {
+  const frontendUrl = process.env.BAR_OWNER_APP_URL || process.env.FRONTEND_URL || 'http://localhost:5173';
+  const verifyLink = `${frontendUrl}/verify-bar-owner-email?token=${token}`;
+
+  await _send(toEmail, 'Verify your business registration email', `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Verify your email</title>
+</head>
+<body style="margin:0;padding:0;background:#0A0A0A;font-family:'DM Sans',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#0A0A0A;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="560" cellpadding="0" cellspacing="0" style="background:#111111;border-radius:16px;border:1px solid rgba(255,255,255,0.06);overflow:hidden;max-width:560px;width:100%;">
+          <tr>
+            <td style="background:linear-gradient(135deg,#1a0000 0%,#111111 100%);padding:36px 40px 28px;border-bottom:1px solid rgba(204,0,0,0.2);">
+              <span style="font-size:1.4rem;font-weight:800;color:#ffffff;letter-spacing:-0.5px;">Party<span style="color:#CC0000;">Goers</span> PH</span>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:36px 40px;">
+              <p style="margin:0 0 8px;font-size:0.78rem;font-weight:700;text-transform:uppercase;letter-spacing:2px;color:#CC0000;">Verify Your Email</p>
+              <h1 style="margin:0 0 16px;font-size:1.6rem;font-weight:800;color:#ffffff;line-height:1.2;">Hi ${firstName}, confirm your email</h1>
+              <p style="margin:0 0 28px;font-size:0.95rem;color:#888888;line-height:1.7;">
+                Please verify this email to continue with admin review of your business registration.
+              </p>
+              <table cellpadding="0" cellspacing="0" width="100%">
+                <tr>
+                  <td align="center" style="padding-bottom:28px;">
+                    <a href="${verifyLink}" target="_blank"
+                       style="display:inline-block;padding:14px 36px;background:#CC0000;color:#ffffff;text-decoration:none;border-radius:100px;font-size:0.95rem;font-weight:700;letter-spacing:0.5px;">
+                      Verify Email
+                    </a>
+                  </td>
+                </tr>
+              </table>
+              <p style="margin:0 0 24px;font-size:0.78rem;color:#555555;line-height:1.6;">
+                If the button doesn't work, copy and paste this link into your browser:<br/>
+                <a href="${verifyLink}" style="color:#CC0000;word-break:break-all;">${verifyLink}</a>
+              </p>
+              <table width="100%" cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="background:#161616;border:1px solid rgba(255,255,255,0.06);border-left:3px solid #CC0000;border-radius:8px;padding:12px 16px;">
+                    <p style="margin:0;font-size:0.78rem;color:#888888;line-height:1.6;">
+                      ⏱️ This link expires in <strong style="color:#ffffff;">24 hours</strong>. If you did not submit a registration, you can safely ignore this email.
+                    </p>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:20px 40px;border-top:1px solid rgba(255,255,255,0.06);">
+              <p style="margin:0;font-size:0.72rem;color:#444444;text-align:center;">
+                © ${new Date().getFullYear()} The Party Goers PH · Cavite, Philippines
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+  `.trim());
+}
+
 async function sendBarApprovalEmail(toEmail, ownerName, businessName) {
   const loginUrl = process.env.BAR_OWNER_URL || 'https://barowner.thepartygoersph.com/login';
 
@@ -300,4 +370,4 @@ async function sendPasswordResetEmail(toEmail, firstName, token) {
     `.trim());
 }
 
-module.exports = { sendVerificationEmail, sendBarApprovalEmail, sendPasswordResetEmail };
+module.exports = { sendVerificationEmail, sendBarOwnerVerificationEmail, sendBarApprovalEmail, sendPasswordResetEmail };

@@ -1,4 +1,4 @@
-﻿const express = require("express");
+const express = require("express");
 const router = express.Router();
 const pool = require("../config/database");
 const bcrypt = require("bcrypt");
@@ -110,6 +110,25 @@ async function hasReservationModeColumn() {
     _hasReservationModeColumnCache = false;
   }
   return _hasReservationModeColumnCache;
+}
+
+let _hasReservationTimeLimitColumnsCache = null;
+async function hasReservationTimeLimitColumns() {
+  if (_hasReservationTimeLimitColumnsCache !== null) return _hasReservationTimeLimitColumnsCache;
+  try {
+    const [rows] = await pool.query(
+      `SELECT 1
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'bars'
+         AND COLUMN_NAME = 'reservation_time_limit_mode'
+       LIMIT 1`
+    );
+    _hasReservationTimeLimitColumnsCache = rows.length > 0;
+  } catch (_) {
+    _hasReservationTimeLimitColumnsCache = false;
+  }
+  return _hasReservationTimeLimitColumnsCache;
 }
 
 // â”€â”€â”€ Multer storage for bar profile images â”€â”€â”€
@@ -623,9 +642,13 @@ router.get(
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
       const includeReservationMode = await hasReservationModeColumn();
+      const includeTimeLimits = await hasReservationTimeLimitColumns();
       const reservationModeSelect = includeReservationMode
         ? ", reservation_mode"
         : ", 'manual_approval' AS reservation_mode";
+      const timeLimitSelect = includeTimeLimits
+        ? ", bar_types, reservation_time_limit_mode, reservation_time_limit_minutes"
+        : ", NULL AS bar_types, NULL AS reservation_time_limit_mode, NULL AS reservation_time_limit_minutes";
 
       const [rows] = await pool.query(
         `SELECT id, name, description, address, city, state, zip_code,
@@ -638,7 +661,7 @@ router.get(
                 friday_hours, saturday_hours, sunday_hours,
                 accept_cash_payment, accept_online_payment, accept_gcash,
                 gcash_number, gcash_account_name,
-                minimum_reservation_deposit${reservationModeSelect},
+                minimum_reservation_deposit${reservationModeSelect}${timeLimitSelect},
                 status, rating, review_count, created_at, updated_at
          FROM bars
          WHERE id = ? LIMIT 1`,
@@ -679,6 +702,7 @@ router.patch(
         "gcash_number", "gcash_account_name"
       ];
       if (includeReservationMode) allowed.push("reservation_mode");
+      if (includeTimeLimits) allowed.push("reservation_time_limit_mode", "reservation_time_limit_minutes");
 
       const updates = [];
       const params = [];
@@ -1636,18 +1660,18 @@ router.get(
       const date = req.query.date || new Date().toISOString().split('T')[0];
 
       const [tables] = await pool.query(
-        `SELECT t.id, t.table_number, t.capacity, t.is_active, t.image_path, t.price, t.manual_status,
+        `SELECT t.id, t.table_number, t.floor_assignment, t.table_size, t.capacity, t.is_active, t.image_path, t.price, t.manual_status,
                 CASE
                   WHEN t.manual_status = 'unavailable' THEN 'unavailable'
                   WHEN t.is_active = 0 THEN 'unavailable'
                   WHEN EXISTS (
                     SELECT 1 FROM reservations r
-                    WHERE r.table_id = t.id AND r.reservation_date = ? AND r.status IN ('pending','approved','paid','confirmed')
+                    WHERE r.table_id = t.id AND r.reservation_date = ? AND r.status IN ('pending','approved','paid','confirmed','checked_in')
                   ) THEN 'reserved'
                   ELSE COALESCE(t.manual_status, 'available')
                 END AS status
          FROM bar_tables t
-         WHERE t.bar_id = ?
+         WHERE t.bar_id = ? AND t.deleted_at IS NULL
          ORDER BY t.table_number ASC`,
         [date, barId]
       );
@@ -1670,8 +1694,8 @@ router.get(
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
       const [rows] = await pool.query(
-        `SELECT id, table_number, capacity, is_active, image_path, price, manual_status, created_at
-         FROM bar_tables WHERE bar_id = ? ORDER BY table_number ASC`,
+        `SELECT id, table_number, floor_assignment, table_size, capacity, is_active, image_path, price, manual_status, created_at
+         FROM bar_tables WHERE bar_id = ? AND deleted_at IS NULL ORDER BY table_number ASC`,
         [barId]
       );
 
@@ -1692,25 +1716,27 @@ router.post(
       const barId = req.user.bar_id;
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
-      const { table_number, capacity, price } = req.body || {};
+      const { table_number, capacity, price, floor_assignment, table_size } = req.body || {};
       if (!table_number) return res.status(400).json({ success: false, message: "table_number required" });
+      if (!capacity) return res.status(400).json({ success: false, message: "capacity required" });
+      if (!table_size) return res.status(400).json({ success: false, message: "table_size required" });
 
       const [existing] = await pool.query(
-        "SELECT id FROM bar_tables WHERE bar_id = ? AND table_number = ? LIMIT 1",
+        "SELECT id FROM bar_tables WHERE bar_id = ? AND table_number = ? AND deleted_at IS NULL LIMIT 1",
         [barId, table_number]
       );
       if (existing.length) return res.status(409).json({ success: false, message: "Table number already exists" });
 
       const [result] = await pool.query(
-        `INSERT INTO bar_tables (bar_id, table_number, capacity, price, is_active)
-         VALUES (?, ?, ?, ?, 1)`,
-        [barId, table_number, capacity || null, price || null]
+        `INSERT INTO bar_tables (bar_id, table_number, floor_assignment, capacity, table_size, price, is_active)
+         VALUES (?, ?, ?, ?, ?, ?, 1)`,
+        [barId, table_number, floor_assignment || null, capacity, table_size, price || null]
       );
 
       logAudit(null, {
         bar_id: barId, user_id: req.user.id,
         action: "CREATE_TABLE", entity: "bar_tables", entity_id: result.insertId,
-        details: { table_number, capacity, price }, ...auditContext(req)
+        details: { table_number, floor_assignment, capacity, table_size, price }, ...auditContext(req)
       });
 
       return res.status(201).json({ success: true, message: "Table created", data: { id: result.insertId } });
@@ -1732,7 +1758,7 @@ router.patch(
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
       if (!id) return res.status(400).json({ success: false, message: "Invalid id" });
 
-      const allowed = ["table_number", "capacity", "is_active", "price", "manual_status"];
+      const allowed = ["table_number", "floor_assignment", "capacity", "table_size", "is_active", "price", "manual_status"];
       const updates = [];
       const params = [];
 
@@ -1748,7 +1774,7 @@ router.patch(
       params.push(id, barId);
 
       const [result] = await pool.query(
-        `UPDATE bar_tables SET ${updates.join(", ")} WHERE id = ? AND bar_id = ?`,
+        `UPDATE bar_tables SET ${updates.join(", ")} WHERE id = ? AND bar_id = ? AND deleted_at IS NULL`,
         params
       );
 
@@ -1780,11 +1806,17 @@ router.delete(
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
       const [result] = await pool.query(
-        "DELETE FROM bar_tables WHERE id = ? AND bar_id = ?",
+        "UPDATE bar_tables SET deleted_at = NOW(), is_active = 0 WHERE id = ? AND bar_id = ? AND deleted_at IS NULL",
         [id, barId]
       );
 
       if (!result.affectedRows) return res.status(404).json({ success: false, message: "Table not found" });
+
+      logAudit(null, {
+        bar_id: barId, user_id: req.user.id,
+        action: "DELETE_TABLE", entity: "bar_tables", entity_id: id,
+        details: {}, ...auditContext(req)
+      });
 
       return res.json({ success: true, message: "Table deleted" });
     } catch (err) {
@@ -1808,7 +1840,7 @@ router.post(
 
       const filePath = req.file.path.replace(/\\/g, "/");
       const [result] = await pool.query(
-        "UPDATE bar_tables SET image_path = ? WHERE id = ? AND bar_id = ?",
+        "UPDATE bar_tables SET image_path = ? WHERE id = ? AND bar_id = ? AND deleted_at IS NULL",
         [filePath, id, barId]
       );
 

@@ -1879,12 +1879,19 @@ router.post("/registrations/:id/approve", async (req, res) => {
     const regId = Number(req.params.id);
     await conn.beginTransaction();
 
-    const [regs] = await conn.query("SELECT * FROM business_registrations WHERE id = ? AND status = 'pending'", [regId]);
+    const [regs] = await conn.query(
+      "SELECT * FROM business_registrations WHERE id = ? AND status IN ('pending', 'pending_admin_approval')",
+      [regId]
+    );
     if (!regs.length) {
       await conn.rollback();
       return res.status(404).json({ success: false, message: "Registration not found or already processed" });
     }
     const reg = regs[0];
+    if (reg.status === "pending_admin_approval" && !reg.email_verified_at) {
+      await conn.rollback();
+      return res.status(400).json({ success: false, message: "Registration email is not verified yet." });
+    }
 
     // Update registration status
     await conn.query(
@@ -1897,9 +1904,9 @@ router.post("/registrations/:id/approve", async (req, res) => {
     const roleId = roleRows.length ? roleRows[0].id : null;
 
     const [userIns] = await conn.query(
-      `INSERT INTO users (first_name, last_name, email, password, phone_number, role, role_id, is_active, is_verified, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 'bar_owner', ?, 1, 1, NOW(), NOW())`,
-      [reg.owner_first_name, reg.owner_last_name, reg.owner_email, reg.owner_password, reg.owner_phone, roleId]
+      `INSERT INTO users (first_name, middle_name, last_name, email, password, phone_number, role, role_id, is_active, is_verified, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'bar_owner', ?, 1, 1, NOW(), NOW())`,
+      [reg.owner_first_name, reg.owner_middle_name || null, reg.owner_last_name, reg.owner_email, reg.owner_password, reg.owner_phone, roleId]
     );
 
     // Create bar_owner record
@@ -1910,11 +1917,61 @@ router.post("/registrations/:id/approve", async (req, res) => {
     );
 
     // Create bar
-    const [barIns] = await conn.query(
-      `INSERT INTO bars (name, address, city, state, zip_code, phone, email, category, owner_id, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW())`,
-      [reg.business_name, reg.business_address, reg.business_city, reg.business_state, reg.business_zip, reg.business_phone, reg.business_email, reg.business_category, boIns.insertId]
-    );
+    let barTypesValue = null;
+    let timeLimitMode = null;
+    let timeLimitMinutes = null;
+    if (reg.bar_types) {
+      try {
+        const parsed = JSON.parse(reg.bar_types);
+        if (Array.isArray(parsed)) {
+          barTypesValue = JSON.stringify(parsed);
+          const normalized = parsed.map((x) => String(x || "").toLowerCase());
+          if (normalized.includes("club")) {
+            timeLimitMode = "club";
+          } else if (normalized.includes("comedy bar")) {
+            timeLimitMode = "event";
+          } else if (normalized.includes("restobar")) {
+            timeLimitMode = "restobar";
+            timeLimitMinutes = 120;
+          } else if (normalized.length) {
+            timeLimitMode = "custom";
+            timeLimitMinutes = 120;
+          }
+        }
+      } catch (_) {}
+    }
+
+    let barIns;
+    try {
+      [barIns] = await conn.query(
+        `INSERT INTO bars (name, address, city, state, zip_code, phone, email, category, bar_types, reservation_time_limit_mode, reservation_time_limit_minutes, owner_id, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW())`,
+        [
+          reg.business_name,
+          reg.business_address,
+          reg.business_city,
+          reg.business_state,
+          reg.business_zip,
+          reg.business_phone,
+          reg.business_email,
+          reg.business_category,
+          barTypesValue,
+          timeLimitMode,
+          timeLimitMinutes,
+          boIns.insertId
+        ]
+      );
+    } catch (e) {
+      if (String(e?.sqlMessage || e?.message || "").toLowerCase().includes("unknown column")) {
+        [barIns] = await conn.query(
+          `INSERT INTO bars (name, address, city, state, zip_code, phone, email, category, owner_id, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW())`,
+          [reg.business_name, reg.business_address, reg.business_city, reg.business_state, reg.business_zip, reg.business_phone, reg.business_email, reg.business_category, boIns.insertId]
+        );
+      } else {
+        throw e;
+      }
+    }
 
     // Update user bar_id
     await conn.query("UPDATE users SET bar_id = ? WHERE id = ?", [barIns.insertId, userIns.insertId]);
@@ -1933,7 +1990,7 @@ router.post("/registrations/:id/approve", async (req, res) => {
 
     // Send approval email to bar owner
     try {
-      const ownerFullName = `${reg.owner_first_name} ${reg.owner_last_name}`;
+      const ownerFullName = [reg.owner_first_name, reg.owner_middle_name, reg.owner_last_name].filter(Boolean).join(" ");
       await sendBarApprovalEmail(reg.owner_email, ownerFullName, reg.business_name);
     } catch (emailErr) {
       console.error("Failed to send approval email:", emailErr);
@@ -1956,7 +2013,7 @@ router.post("/registrations/:id/reject", async (req, res) => {
     const reason = req.body?.reason || null;
 
     const [result] = await pool.query(
-      "UPDATE business_registrations SET status = 'rejected', rejection_reason = ?, reviewed_by = ?, reviewed_at = NOW() WHERE id = ? AND status = 'pending'",
+      "UPDATE business_registrations SET status = 'rejected', rejection_reason = ?, reviewed_by = ?, reviewed_at = NOW() WHERE id = ? AND status IN ('pending', 'pending_admin_approval', 'pending_email_verification')",
       [reason, req.user.id, regId]
     );
 

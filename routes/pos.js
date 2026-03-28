@@ -54,7 +54,7 @@ router.get(
       const [tables] = await pool.query(
         `SELECT id, table_number, capacity, is_active, image_path, price
          FROM bar_tables
-         WHERE bar_id = ?
+         WHERE bar_id = ? AND deleted_at IS NULL
          ORDER BY table_number ASC`,
         [barId]
       );
@@ -121,7 +121,7 @@ router.post(
       // Validate table if provided
       if (table_id) {
         const [tableRows] = await conn.query(
-          "SELECT id, is_active FROM bar_tables WHERE id = ? AND bar_id = ? LIMIT 1",
+          "SELECT id, is_active FROM bar_tables WHERE id = ? AND bar_id = ? AND deleted_at IS NULL LIMIT 1",
           [table_id, barId]
         );
         if (!tableRows.length) {

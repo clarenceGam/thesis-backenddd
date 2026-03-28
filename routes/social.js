@@ -1526,7 +1526,7 @@ router.get("/events/:eventId/tables", async (req, res) => {
     const [allTables] = await pool.query(
       `SELECT id, bar_id, table_number, capacity, is_active, manual_status, image_path, price
        FROM bar_tables
-       WHERE bar_id = ? AND is_active = 1
+       WHERE bar_id = ? AND is_active = 1 AND deleted_at IS NULL
        ORDER BY capacity ASC, table_number ASC`,
       [barId]
     );
@@ -1537,7 +1537,7 @@ router.get("/events/:eventId/tables", async (req, res) => {
       const [reserved] = await pool.query(
         `SELECT DISTINCT table_id FROM reservations
          WHERE bar_id = ? AND reservation_date = ? AND reservation_time = ?
-           AND status IN ('pending','approved','paid','confirmed')`,
+          AND status IN ('pending','approved','paid','confirmed','checked_in')`,
         [barId, eventDate, eventTime]
       );
       reservedTableIds = reserved.map(r => r.table_id);

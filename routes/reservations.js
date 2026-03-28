@@ -37,6 +37,67 @@ async function hasReservationModeColumn() {
   return _hasReservationModeColumnCache;
 }
 
+let _hasReservationTimeLimitColumnsCache = null;
+async function hasReservationTimeLimitColumns() {
+  if (_hasReservationTimeLimitColumnsCache !== null) return _hasReservationTimeLimitColumnsCache;
+  try {
+    const [rows] = await pool.query(
+      `SELECT 1
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'bars'
+         AND COLUMN_NAME = 'reservation_time_limit_mode'
+       LIMIT 1`
+    );
+    _hasReservationTimeLimitColumnsCache = rows.length > 0;
+  } catch (_) {
+    _hasReservationTimeLimitColumnsCache = false;
+  }
+  return _hasReservationTimeLimitColumnsCache;
+}
+
+let _hasReservedUntilColumnCache = null;
+async function hasReservedUntilColumn() {
+  if (_hasReservedUntilColumnCache !== null) return _hasReservedUntilColumnCache;
+  try {
+    const [rows] = await pool.query(
+      `SELECT 1
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'reservations'
+         AND COLUMN_NAME = 'reserved_until'
+       LIMIT 1`
+    );
+    _hasReservedUntilColumnCache = rows.length > 0;
+  } catch (_) {
+    _hasReservedUntilColumnCache = false;
+  }
+  return _hasReservedUntilColumnCache;
+}
+
+function parseJsonArray(raw) {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function formatMysqlDateTime(dt) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${dt.getFullYear()}-${pad(dt.getMonth() + 1)}-${pad(dt.getDate())} ${pad(dt.getHours())}:${pad(dt.getMinutes())}:${pad(dt.getSeconds())}`;
+}
+
+function deriveTimeLimitModeFromBarTypes(barTypes) {
+  const normalized = barTypes.map((x) => String(x || "").toLowerCase());
+  if (normalized.includes("club")) return "club";
+  if (normalized.includes("comedy bar")) return "event";
+  if (normalized.includes("restobar")) return "restobar";
+  return null;
+}
+
 function normalizeReservationHourInput(rawTime) {
   if (!rawTime) return null;
   const str = String(rawTime).trim();
@@ -252,7 +313,7 @@ router.get("/bars/:id/tables", async (req, res) => {
     const [rows] = await pool.query(
       `SELECT id, bar_id, table_number, capacity, is_active, created_at
        FROM bar_tables
-       WHERE bar_id=?
+       WHERE bar_id=? AND deleted_at IS NULL
        ORDER BY capacity ASC, table_number ASC`,
       [barId]
     );
@@ -291,8 +352,18 @@ router.get("/bars/:id/available-tables", async (req, res) => {
       return res.status(400).json({ success: false, message: "Invalid reservation date" });
     }
 
-    const [barHoursRows] = await pool.query(`SELECT ${dayCol} AS hours FROM bars WHERE id = ? LIMIT 1`, [barId]);
-    const barHours = barHoursRows[0]?.hours || null;
+    const includeTimeLimits = await hasReservationTimeLimitColumns();
+    const includeReservedUntil = await hasReservedUntilColumn();
+    const timeLimitSelect = includeTimeLimits
+      ? `, bar_types, reservation_time_limit_mode, reservation_time_limit_minutes`
+      : `, NULL AS bar_types, NULL AS reservation_time_limit_mode, NULL AS reservation_time_limit_minutes`;
+
+    const [barHoursRows] = await pool.query(
+      `SELECT ${dayCol} AS hours${timeLimitSelect} FROM bars WHERE id = ? LIMIT 1`,
+      [barId]
+    );
+    const barRow = barHoursRows[0] || {};
+    const barHours = barRow.hours || null;
     const hourlySlots = buildHourlySlotsForDate(barHours, date);
     if (!hourlySlots.length) {
       return res.json({
@@ -321,34 +392,74 @@ router.get("/bars/:id/available-tables", async (req, res) => {
       return res.status(400).json({ success: false, message: "party_size must be a positive number" });
     }
 
-    // Available = active tables minus those already reserved (pending/approved) for same date+time
+    const barTypes = parseJsonArray(barRow.bar_types);
+    const derivedMode = deriveTimeLimitModeFromBarTypes(barTypes);
+    const mode = includeTimeLimits ? (barRow.reservation_time_limit_mode || derivedMode) : null;
+    const minutes = includeTimeLimits
+      ? Number(barRow.reservation_time_limit_minutes || (mode === "club" ? 24 * 60 : mode === "restobar" ? 120 : 60))
+      : 60;
+
+    const requestedStart = new Date(`${date}T${normalizedTime}`);
+    const requestedEnd = mode === "club"
+      ? new Date(`${date}T23:59:59`)
+      : new Date(requestedStart.getTime() + (Number.isFinite(minutes) && minutes > 0 ? minutes : 60) * 60000);
+
+    // Available = active tables minus those already reserved for overlapping time window
     let capacityFilter = "";
     if (partySize) capacityFilter = " AND t.capacity >= ? ";
 
     const baseParams = [barId];
     if (partySize) baseParams.push(partySize);
-    baseParams.push(barId, date, normalizedTime);
+    if (includeReservedUntil) {
+      baseParams.push(barId, date, formatMysqlDateTime(requestedEnd), minutes, formatMysqlDateTime(requestedStart));
+    } else {
+      baseParams.push(barId, date, normalizedTime);
+    }
 
-    const [rows] = await pool.query(
-      `SELECT t.id, t.bar_id, t.table_number, t.capacity, t.is_active,
-              t.manual_status,
-              t.image_path, t.price
-       FROM bar_tables t
-       WHERE t.bar_id = ?
-         AND t.is_active = 1
-         AND t.manual_status NOT IN ('reserved','unavailable')
-         ${capacityFilter}
-         AND t.id NOT IN (
-           SELECT r.table_id
-           FROM reservations r
-           WHERE r.bar_id = ?
-             AND r.reservation_date = ?
-             AND r.reservation_time = ?
-             AND r.status IN ('pending','approved','paid','confirmed')
-         )
-       ORDER BY t.capacity ASC, t.table_number ASC`,
-      baseParams
-    );
+    const [rows] = includeReservedUntil
+      ? await pool.query(
+          `SELECT t.id, t.bar_id, t.table_number, t.capacity, t.is_active,
+                  t.manual_status,
+                  t.image_path, t.price
+           FROM bar_tables t
+           WHERE t.bar_id = ?
+             AND t.deleted_at IS NULL
+             AND t.is_active = 1
+             AND t.manual_status NOT IN ('reserved','unavailable')
+             ${capacityFilter}
+             AND t.id NOT IN (
+               SELECT r.table_id
+               FROM reservations r
+               WHERE r.bar_id = ?
+                 AND r.reservation_date = ?
+                 AND r.status IN ('pending','approved','paid','confirmed','checked_in')
+                 AND TIMESTAMP(CONCAT(r.reservation_date, ' ', r.reservation_time)) < ?
+                 AND COALESCE(r.reserved_until, TIMESTAMPADD(MINUTE, ?, TIMESTAMP(CONCAT(r.reservation_date, ' ', r.reservation_time)))) > ?
+             )
+           ORDER BY t.capacity ASC, t.table_number ASC`,
+          baseParams
+        )
+      : await pool.query(
+          `SELECT t.id, t.bar_id, t.table_number, t.capacity, t.is_active,
+                  t.manual_status,
+                  t.image_path, t.price
+           FROM bar_tables t
+           WHERE t.bar_id = ?
+             AND t.deleted_at IS NULL
+             AND t.is_active = 1
+             AND t.manual_status NOT IN ('reserved','unavailable')
+             ${capacityFilter}
+             AND t.id NOT IN (
+               SELECT r.table_id
+               FROM reservations r
+               WHERE r.bar_id = ?
+                 AND r.reservation_date = ?
+                 AND r.reservation_time = ?
+                 AND r.status IN ('pending','approved','paid','confirmed','checked_in')
+             )
+           ORDER BY t.capacity ASC, t.table_number ASC`,
+          baseParams
+        );
 
     return res.json({ success: true, data: rows, available_hours: hourlySlots });
   } catch (err) {
@@ -400,6 +511,8 @@ router.post(
 
       const includeReservationMode = await hasReservationModeColumn();
       const includeEventId = await hasReservationEventIdColumn();
+      const includeTimeLimits = await hasReservationTimeLimitColumns();
+      const includeReservedUntil = await hasReservedUntilColumn();
 
       const normalizedReservationTime = normalizeReservationHourInput(reservation_time);
       if (!normalizedReservationTime) {
@@ -426,13 +539,18 @@ router.post(
       }
 
       // Check reservation_mode for this bar (manual_approval default)
+      const barSelect = [
+        includeReservationMode ? "reservation_mode" : "NULL AS reservation_mode",
+        includeTimeLimits ? "bar_types" : "NULL AS bar_types",
+        includeTimeLimits ? "reservation_time_limit_mode" : "NULL AS reservation_time_limit_mode",
+        includeTimeLimits ? "reservation_time_limit_minutes" : "NULL AS reservation_time_limit_minutes",
+      ].join(", ");
       const [barRows] = await conn.query(
-        includeReservationMode
-          ? "SELECT reservation_mode FROM bars WHERE id = ? LIMIT 1"
-          : "SELECT NULL AS reservation_mode FROM bars WHERE id = ? LIMIT 1",
+        `SELECT ${barSelect} FROM bars WHERE id = ? LIMIT 1`,
         [barId]
       );
-      const reservationMode = String(barRows[0]?.reservation_mode || "manual_approval").toLowerCase();
+      const barRow = barRows[0] || {};
+      const reservationMode = String(barRow.reservation_mode || "manual_approval").toLowerCase();
       const initialStatus = reservationMode === "auto_accept" ? "approved" : "pending";
 
       if (eventId && includeEventId) {
@@ -447,6 +565,37 @@ router.post(
           await conn.rollback();
           return res.status(404).json({ success: false, message: "Event not found for this bar" });
         }
+      }
+
+      const barTypes = parseJsonArray(barRow.bar_types);
+      const derivedMode = deriveTimeLimitModeFromBarTypes(barTypes);
+      const mode = includeTimeLimits ? (barRow.reservation_time_limit_mode || derivedMode) : null;
+      const minutes = includeTimeLimits
+        ? Number(barRow.reservation_time_limit_minutes || (mode === "club" ? 24 * 60 : mode === "restobar" ? 120 : 60))
+        : 60;
+      const reservationStart = new Date(`${reservation_date}T${normalizedReservationTime}`);
+
+      let reservedUntil = null;
+      if (mode === "club") {
+        reservedUntil = new Date(`${reservation_date}T23:59:59`);
+      } else if (mode === "event" && eventId && includeEventId) {
+        const [evRows] = await conn.query(
+          `SELECT event_date, start_time, end_time
+           FROM bar_events
+           WHERE id = ? AND bar_id = ? AND archived_at IS NULL
+           LIMIT 1`,
+          [eventId, barId]
+        );
+        const ev = evRows[0] || null;
+        if (ev) {
+          const evStart = new Date(`${ev.event_date}T${ev.start_time || normalizedReservationTime}`);
+          let evEnd = ev.end_time ? new Date(`${ev.event_date}T${ev.end_time}`) : new Date(evStart.getTime() + 2 * 60 * 60 * 1000);
+          if (evEnd.getTime() <= evStart.getTime()) evEnd = new Date(evEnd.getTime() + 24 * 60 * 60 * 1000);
+          reservedUntil = evEnd;
+        }
+      }
+      if (!reservedUntil) {
+        reservedUntil = new Date(reservationStart.getTime() + (Number.isFinite(minutes) && minutes > 0 ? minutes : 60) * 60000);
       }
 
       // Check table belongs to bar and active + capacity ok
@@ -476,41 +625,81 @@ router.post(
         return res.status(400).json({ success: false, message: "Party size exceeds table capacity" });
       }
 
-      // Prevent double booking – check for overlap within 1-hour window
-      const [conflict] = await conn.query(
-        `SELECT id, reservation_time
-         FROM reservations
-         WHERE bar_id = ?
-           AND table_id = ?
-           AND reservation_date = ?
-           AND status IN ('pending','approved','paid')
-           AND ABS(TIME_TO_SEC(TIMEDIFF(reservation_time, ?))) < 3600
-         LIMIT 1`,
-        [barId, tableId, reservation_date, normalizedReservationTime]
-      );
+      // Prevent double booking – overlap check within reserved window
+      const [conflict] = includeReservedUntil
+        ? await conn.query(
+            `SELECT id
+             FROM reservations
+             WHERE bar_id = ?
+               AND table_id = ?
+               AND reservation_date = ?
+               AND status IN ('pending','approved','paid','confirmed','checked_in')
+               AND TIMESTAMP(CONCAT(reservation_date, ' ', reservation_time)) < ?
+               AND COALESCE(reserved_until, TIMESTAMPADD(MINUTE, ?, TIMESTAMP(CONCAT(reservation_date, ' ', reservation_time)))) > ?
+             LIMIT 1`,
+            [barId, tableId, reservation_date, formatMysqlDateTime(reservedUntil), minutes, formatMysqlDateTime(reservationStart)]
+          )
+        : await conn.query(
+            `SELECT id, reservation_time
+             FROM reservations
+             WHERE bar_id = ?
+               AND table_id = ?
+               AND reservation_date = ?
+               AND status IN ('pending','approved','paid')
+               AND ABS(TIME_TO_SEC(TIMEDIFF(reservation_time, ?))) < 3600
+             LIMIT 1`,
+            [barId, tableId, reservation_date, normalizedReservationTime]
+          );
 
       if (conflict.length) {
         await conn.rollback();
         return res.status(409).json({
           success: false,
-          message: "This table is already reserved within the same time slot. Please choose a different time (at least 1 hour apart) or another table."
+          message: "This table is already reserved for an overlapping time window. Please choose a different time or another table."
         });
       }
 
       const txnNumber = generateTransactionNumber();
 
+      const insertReservedUntil = includeReservedUntil ? ", reserved_until" : "";
+      const insertReservedUntilValues = includeReservedUntil ? ", ?" : "";
+      const reservedUntilValue = includeReservedUntil ? formatMysqlDateTime(reservedUntil) : null;
+
       const [ins] = includeEventId
         ? await conn.query(
             `INSERT INTO reservations
-             (transaction_number, bar_id, table_id, event_id, customer_user_id, reservation_date, reservation_time, party_size, notes, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [txnNumber, barId, tableId, eventId, customerId, reservation_date, normalizedReservationTime, partySize, notes || null, initialStatus]
+             (transaction_number, bar_id, table_id, event_id, customer_user_id, reservation_date, reservation_time${insertReservedUntil}, party_size, notes, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?${insertReservedUntilValues}, ?, ?, ?)`,
+            [
+              txnNumber,
+              barId,
+              tableId,
+              eventId,
+              customerId,
+              reservation_date,
+              normalizedReservationTime,
+              ...(includeReservedUntil ? [reservedUntilValue] : []),
+              partySize,
+              notes || null,
+              initialStatus
+            ]
           )
         : await conn.query(
             `INSERT INTO reservations
-             (transaction_number, bar_id, table_id, customer_user_id, reservation_date, reservation_time, party_size, notes, status)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-            [txnNumber, barId, tableId, customerId, reservation_date, normalizedReservationTime, partySize, notes || null, initialStatus]
+             (transaction_number, bar_id, table_id, customer_user_id, reservation_date, reservation_time${insertReservedUntil}, party_size, notes, status)
+             VALUES (?, ?, ?, ?, ?, ?${insertReservedUntilValues}, ?, ?, ?)`,
+            [
+              txnNumber,
+              barId,
+              tableId,
+              customerId,
+              reservation_date,
+              normalizedReservationTime,
+              ...(includeReservedUntil ? [reservedUntilValue] : []),
+              partySize,
+              notes || null,
+              initialStatus
+            ]
           );
 
       // Save menu items if provided
@@ -601,7 +790,7 @@ router.get(
       const [rows] = await pool.query(
         `SELECT r.id, r.transaction_number, r.bar_id, b.name AS bar_name, r.table_id, t.table_number,
                 r.reservation_date, r.reservation_time, r.party_size,
-                r.status, r.payment_status, r.notes, r.paid_at, r.created_at,
+                r.status, r.payment_status, r.notes, r.paid_at, r.checked_in_at, r.no_show_at, r.created_at,
                 pt.reference_id, pt.payment_method
          FROM reservations r
          JOIN bars b ON b.id = r.bar_id
@@ -620,6 +809,65 @@ router.get(
       return res.json({ success: true, data: rows });
     } catch (err) {
       console.error("MY RESERVATIONS ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+// POST /reservations/:id/check-in (customer)
+router.post(
+  "/reservations/:id/check-in",
+  requireAuth,
+  requireRole([USER_ROLES.CUSTOMER]),
+  async (req, res) => {
+    try {
+      const customerId = req.user.id;
+      const id = Number(req.params.id);
+      if (!id) return res.status(400).json({ success: false, message: "Invalid id" });
+
+      const [rows] = await pool.query(
+        `SELECT id, status, checked_in_at, reservation_date, reservation_time
+         FROM reservations
+         WHERE id=? AND customer_user_id=? LIMIT 1`,
+        [id, customerId]
+      );
+      if (!rows.length) return res.status(404).json({ success: false, message: "Reservation not found" });
+
+      const r = rows[0];
+      if (r.checked_in_at) {
+        return res.json({ success: true, message: "Already checked in" });
+      }
+      if (r.status !== "confirmed") {
+        return res.status(400).json({ success: false, message: "Reservation is not eligible for check-in" });
+      }
+
+      const [timeRows] = await pool.query(
+        `SELECT NOW() AS now_dt,
+                TIMESTAMP(CONCAT(?, ' ', ?)) AS start_dt,
+                TIMESTAMPADD(MINUTE, 30, TIMESTAMP(CONCAT(?, ' ', ?))) AS grace_dt`,
+        [r.reservation_date, r.reservation_time, r.reservation_date, r.reservation_time]
+      );
+      const nowDt = new Date(timeRows[0].now_dt);
+      const startDt = new Date(timeRows[0].start_dt);
+      const graceDt = new Date(timeRows[0].grace_dt);
+
+      if (nowDt < startDt) {
+        return res.status(400).json({ success: false, message: "Check-in is available at your reservation time." });
+      }
+      if (nowDt > graceDt) {
+        return res.status(400).json({ success: false, message: "Check-in window has expired." });
+      }
+
+      await pool.query(
+        `UPDATE reservations
+         SET status='checked_in', checked_in_at=NOW()
+         WHERE id=? AND customer_user_id=? AND status='confirmed' AND checked_in_at IS NULL`,
+        [id, customerId]
+      );
+
+      return res.json({ success: true, message: "Checked in successfully" });
+    } catch (err) {
+      console.error("CUSTOMER CHECK-IN ERROR:", err);
       return res.status(500).json({ success: false, message: "Server error" });
     }
   }
@@ -846,7 +1094,7 @@ router.get(
                 cu.email AS guest_email,
                 cu.phone_number AS guest_phone,
                 r.reservation_date, r.reservation_time, r.party_size,
-                r.status, r.payment_status, r.deposit_amount,
+                r.status, r.payment_status, r.deposit_amount, r.checked_in_at, r.no_show_at,
                 r.occasion, r.notes, r.created_at
          FROM reservations r
          JOIN bar_tables t ON t.id = r.table_id
@@ -879,14 +1127,16 @@ router.patch(
       if (!id) return res.status(400).json({ success: false, message: "Invalid id" });
 
       const action = String(req.body?.action || "").toLowerCase();
-      const allowed = ["approve", "reject", "cancel"];
+      const allowed = ["approve", "reject", "cancel", "check_in", "complete"];
       if (!allowed.includes(action)) {
-        return res.status(400).json({ success: false, message: "action must be approve, reject, or cancel" });
+        return res.status(400).json({ success: false, message: "Invalid action" });
       }
 
       const nextStatus =
         action === "approve" ? "approved" :
         action === "reject" ? "rejected" :
+        action === "check_in" ? "checked_in" :
+        action === "complete" ? "completed" :
         "cancelled";
 
       const [found] = await pool.query(
@@ -905,12 +1155,21 @@ router.patch(
         return res.status(400).json({ success: false, message: "Reservation is already cancelled." });
       }
 
-      await pool.query(
-        `UPDATE reservations
-         SET status=?
-         WHERE id=? AND bar_id=?`,
-        [nextStatus, id, barId]
-      );
+      if (action === "check_in") {
+        await pool.query(
+          `UPDATE reservations
+           SET status='checked_in', checked_in_at=NOW()
+           WHERE id=? AND bar_id=? AND status='confirmed' AND checked_in_at IS NULL`,
+          [id, barId]
+        );
+      } else {
+        await pool.query(
+          `UPDATE reservations
+           SET status=?
+           WHERE id=? AND bar_id=?`,
+          [nextStatus, id, barId]
+        );
+      }
 
       logAudit(null, {
         bar_id: barId,
@@ -920,6 +1179,10 @@ router.patch(
             ? "APPROVE_RESERVATION"
             : nextStatus === "rejected"
             ? "REJECT_RESERVATION"
+            : nextStatus === "checked_in"
+            ? "CHECKIN_RESERVATION"
+            : nextStatus === "completed"
+            ? "COMPLETE_RESERVATION"
             : "CANCEL_RESERVATION",
         entity: "reservations",
         entity_id: id,

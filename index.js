@@ -230,6 +230,7 @@ ensureDefaults();
 // ── Reservation Reminder Scheduler ──
 // Send reminder notifications every 4 hours for reservations happening today
 const { sendTodayReservationReminders } = require('./utils/reservationReminders');
+const { processNoShowReservations } = require('./utils/reservationNoShow');
 
 // Run immediately on startup
 sendTodayReservationReminders().catch(err => {
@@ -244,6 +245,13 @@ setInterval(() => {
 }, 4 * 60 * 60 * 1000);
 
 console.log('✅ Reservation reminder scheduler initialized (runs every 4 hours)');
+
+// ── Reservation No-Show Scheduler ──
+setInterval(() => {
+  processNoShowReservations().catch(err => {
+    console.error('[SCHEDULER] Failed to process no-show reservations:', err);
+  });
+}, 60 * 1000);
 
 // Global error handlers
 process.on('uncaughtException', (err) => {

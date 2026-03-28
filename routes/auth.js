@@ -7,7 +7,7 @@ const crypto = require("crypto");
 const { USER_ROLES } = require("../config/constants");
 const { safeProfileUrl } = require("../utils/profileUrl");
 const { logAudit, auditContext } = require("../utils/audit");
-const { sendVerificationEmail, sendPasswordResetEmail } = require("../utils/emailService");
+const { sendVerificationEmail, sendBarOwnerVerificationEmail, sendPasswordResetEmail } = require("../utils/emailService");
 const { DEFAULT_AVATAR } = require("../utils/profileUrl");
 
 let hasGlobalBanColumnCache = null;
@@ -1203,15 +1203,16 @@ router.post(
   "/register-bar-owner",
   barOwnerUpload.fields([
     { name: "bir_certificate", maxCount: 1 },
-    { name: "business_permit", maxCount: 1 }
+    { name: "business_permit", maxCount: 1 },
+    { name: "selfie_with_id", maxCount: 1 }
   ]),
   async (req, res) => {
     try {
       const {
         // Step 1 — Owner Account
-        first_name, last_name, email, password, phone_number,
+        first_name, middle_name, last_name, email, password, phone_number,
         // Step 2 — Bar Details
-        bar_name, bar_address, bar_city, bar_description,
+        bar_name, bar_address, bar_city, bar_barangay, bar_types, bar_description,
         opening_time, closing_time, gcash_number, gcash_name
       } = req.body || {};
 
@@ -1233,11 +1234,19 @@ router.post(
       // Require both documents
       const birFile = req.files?.bir_certificate?.[0];
       const permitFile = req.files?.business_permit?.[0];
+      const selfieFile = req.files?.selfie_with_id?.[0];
       if (!birFile) {
         return res.status(400).json({ success: false, message: "BIR Certificate is required" });
       }
       if (!permitFile) {
         return res.status(400).json({ success: false, message: "Business Permit is required" });
+      }
+      if (!selfieFile) {
+        return res.status(400).json({ success: false, message: "Photo holding your ID is required" });
+      }
+      const selfieExt = path.extname(selfieFile.originalname).toLowerCase();
+      if (![".jpg", ".jpeg", ".png"].includes(selfieExt)) {
+        return res.status(400).json({ success: false, message: "Photo holding your ID must be a JPG or PNG image" });
       }
 
       // Check duplicate email in users
@@ -1248,7 +1257,7 @@ router.post(
 
       // Check duplicate pending registration
       const [existingReg] = await pool.query(
-        "SELECT id FROM business_registrations WHERE owner_email = ? AND status = 'pending' LIMIT 1",
+        "SELECT id FROM business_registrations WHERE owner_email = ? AND status IN ('pending','pending_email_verification','pending_admin_approval') LIMIT 1",
         [emailNorm]
       );
       if (existingReg.length) {
@@ -1258,26 +1267,49 @@ router.post(
       const hashedPassword = await bcrypt.hash(password, 10);
       const birPath = birFile.path.replace(/\\/g, "/");
       const permitPath = permitFile.path.replace(/\\/g, "/");
+      const selfiePath = selfieFile.path.replace(/\\/g, "/");
+
+      const verificationToken = crypto.randomBytes(32).toString("hex");
+      const tokenExpires = new Date(Date.now() + 24 * 60 * 60 * 1000);
+
+      let barTypesJson = null;
+      if (bar_types) {
+        try {
+          const parsed = JSON.parse(bar_types);
+          if (Array.isArray(parsed)) barTypesJson = JSON.stringify(parsed);
+        } catch (_) {
+          barTypesJson = null;
+        }
+      }
+      const fullAddress = bar_barangay ? `${bar_address}, ${bar_barangay}` : bar_address;
 
       const [result] = await pool.query(
         `INSERT INTO business_registrations
-         (business_name, business_address, business_city, business_phone,
+         (business_name, business_address, business_city, business_state, business_phone, business_barangay, bar_types,
           business_description, opening_time, closing_time, gcash_number, gcash_name,
-          owner_first_name, owner_last_name, owner_email, owner_phone, owner_password,
-          bir_certificate, business_permit, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NOW(), NOW())`,
+          owner_first_name, owner_middle_name, owner_last_name, owner_email, owner_phone, owner_password,
+          email_verification_token, email_verification_expires,
+          bir_certificate, business_permit, selfie_with_id, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending_email_verification', NOW(), NOW())`,
         [
-          bar_name, bar_address, bar_city, phone_number || null,
+          bar_name, fullAddress, bar_city, "Cavite", phone_number || null, bar_barangay || null, barTypesJson,
           bar_description || null, opening_time || null, closing_time || null,
           gcash_number || null, gcash_name || null,
-          first_name, last_name, emailNorm, phone_number || null, hashedPassword,
-          birPath, permitPath
+          first_name, middle_name || null, last_name, emailNorm, phone_number || null, hashedPassword,
+          verificationToken, tokenExpires,
+          birPath, permitPath, selfiePath
         ]
       );
 
+      try {
+        await sendBarOwnerVerificationEmail(emailNorm, first_name, verificationToken);
+      } catch (emailErr) {
+        console.error("BAR OWNER VERIFICATION EMAIL ERROR:", emailErr);
+      }
+
       return res.status(201).json({
         success: true,
-        message: "Registration submitted! Our team will review your application and documents before granting access.",
+        message: "Registration submitted. Please check your email to verify your address before admin review.",
         data: { registration_id: result.insertId }
       });
     } catch (err) {
@@ -1286,6 +1318,47 @@ router.post(
     }
   }
 );
+
+router.get("/verify-bar-owner-email", async (req, res) => {
+  try {
+    const { token } = req.query;
+    if (!token) return res.status(400).json({ success: false, message: "Token is required" });
+
+    const [rows] = await pool.query(
+      "SELECT id, email_verification_expires, email_verified_at, status FROM business_registrations WHERE email_verification_token = ? LIMIT 1",
+      [token]
+    );
+
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: "Invalid or already used verification link." });
+    }
+
+    const reg = rows[0];
+    if (reg.email_verified_at) {
+      return res.json({
+        success: true,
+        message: "Email already verified. Your account is under review. You will be notified once approved."
+      });
+    }
+
+    if (reg.email_verification_expires && new Date() > new Date(reg.email_verification_expires)) {
+      return res.status(410).json({ success: false, message: "Verification link has expired. Please register again." });
+    }
+
+    await pool.query(
+      "UPDATE business_registrations SET email_verified_at = NOW(), email_verification_token = NULL, email_verification_expires = NULL, status = 'pending_admin_approval' WHERE id = ?",
+      [reg.id]
+    );
+
+    return res.json({
+      success: true,
+      message: "Your account is under review. You will be notified once approved."
+    });
+  } catch (err) {
+    console.error("VERIFY BAR OWNER EMAIL ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
 
 // ─── JOIN TPG: Business Registration (public, with doc uploads) ───
 router.post("/register-business", regDocsUpload.array("supporting_docs", 5), async (req, res) => {

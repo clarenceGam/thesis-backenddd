@@ -445,7 +445,7 @@ router.get("/bars/:id/tables", async (req, res) => {
     const [rows] = await pool.query(
       `SELECT id, bar_id, table_number, capacity, is_active, created_at, image_path, price
        FROM bar_tables
-       WHERE bar_id = ? AND is_active = 1
+       WHERE bar_id = ? AND is_active = 1 AND deleted_at IS NULL
        ORDER BY capacity ASC, table_number ASC`,
       [barId]
     );
