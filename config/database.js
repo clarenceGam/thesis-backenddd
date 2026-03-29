@@ -7,7 +7,7 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME,
   waitForConnections: true,
   connectionLimit: 10,
-  timezone: '+08:00', // Philippine Time (Asia/Manila)
+  timezone: 'Z', // Store timestamps in UTC for consistent frontend display
 });
 
 module.exports = pool;

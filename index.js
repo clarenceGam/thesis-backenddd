@@ -1,7 +1,8 @@
 require("dotenv").config();
 
-// Set timezone to Philippine Time (Asia/Manila) for all Node.js operations
-process.env.TZ = 'Asia/Manila';
+// Use UTC for all timestamps to ensure consistency with frontend
+// Frontend will handle timezone conversion for display
+process.env.TZ = 'UTC';
 
 // Startup env check
 console.log('[ENV CHECK] GOOGLE_CLIENT_ID:', process.env.GOOGLE_CLIENT_ID ? 'SET ✅' : 'MISSING ❌');
@@ -47,6 +48,7 @@ const superAdminPaymentsRoutes = require("./routes/superAdminPayments");
 const feedWidgetsRoutes = require("./routes/feedWidgets");
 const statsRoutes = require('./routes/stats');
 const customerOrdersRoutes = require('./routes/customerOrders');
+const permitMonitoringRoutes = require('./routes/permitMonitoring');
 
 const app = express();
 
@@ -223,6 +225,8 @@ app.use("/feed-widgets", feedWidgetsRoutes);
 app.use("/stats", statsRoutes);
 // Customer web ordering (tax-aware)
 app.use("/customer-orders", customerOrdersRoutes);
+// Permit expiry monitoring (super admin)
+app.use("/permit-monitoring", permitMonitoringRoutes);
 
 // Create default avatar on startup
 ensureDefaults();
@@ -231,6 +235,7 @@ ensureDefaults();
 // Send reminder notifications every 4 hours for reservations happening today
 const { sendTodayReservationReminders } = require('./utils/reservationReminders');
 const { processNoShowReservations } = require('./utils/reservationNoShow');
+const { startScheduler } = require('./jobs/scheduler');
 
 // Run immediately on startup
 sendTodayReservationReminders().catch(err => {
@@ -245,6 +250,9 @@ setInterval(() => {
 }, 4 * 60 * 60 * 1000);
 
 console.log('✅ Reservation reminder scheduler initialized (runs every 4 hours)');
+
+// ── Permit Expiry Scheduler ──
+startScheduler();
 
 // ── Reservation No-Show Scheduler ──
 setInterval(() => {

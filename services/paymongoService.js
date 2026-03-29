@@ -68,8 +68,8 @@ class PayMongoService {
           currency: 'PHP',
           type,
           redirect: {
-            success: metadata.success_url || `${process.env.APP_URL}/payment/success`,
-            failed: metadata.failed_url || `${process.env.APP_URL}/payment/failed`,
+            success: metadata.success_url || `${process.env.FRONTEND_URL || 'https://customer-website.com'}/payment/success`,
+            failed: metadata.failed_url || `${process.env.FRONTEND_URL || 'https://customer-website.com'}/payment/failed`,
           },
           billing: metadata.billing || null,
           statement_descriptor: metadata.description || 'Platform Bar Payment',

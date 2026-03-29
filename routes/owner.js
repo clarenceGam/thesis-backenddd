@@ -699,7 +699,8 @@ router.patch(
         "friday_hours", "saturday_hours", "sunday_hours",
         "accept_cash_payment", "accept_online_payment", "accept_gcash",
         "minimum_reservation_deposit",
-        "gcash_number", "gcash_account_name"
+        "gcash_number", "gcash_account_name",
+        "staff_types"
       ];
       if (includeReservationMode) allowed.push("reservation_mode");
       if (includeTimeLimits) allowed.push("reservation_time_limit_mode", "reservation_time_limit_minutes");
@@ -717,7 +718,12 @@ router.patch(
       for (const key of allowed) {
         if (req.body[key] !== undefined) {
           updates.push(`${key} = ?`);
-          params.push(req.body[key]);
+          // Handle staff_types as JSON
+          if (key === "staff_types") {
+            params.push(Array.isArray(req.body[key]) ? JSON.stringify(req.body[key]) : req.body[key]);
+          } else {
+            params.push(req.body[key]);
+          }
         }
       }
 
@@ -2615,5 +2621,232 @@ router.put("/tax-config", requireAuth, requireRole([USER_ROLES.BAR_OWNER]), asyn
     return res.status(500).json({ success: false, message: "Server error" });
   }
 });
+
+// ═══════════════════════════════════════════
+// PACKAGE MANAGEMENT
+// ═══════════════════════════════════════════
+
+// GET /owner/bar/packages — list packages for this bar
+router.get(
+  "/bar/packages",
+  requireAuth,
+  requirePermission("menu_view"),
+  async (req, res) => {
+    try {
+      const barId = req.user.bar_id;
+      if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+      const [packages] = await pool.query(
+        `SELECT id, name, description, price, is_active, created_at, updated_at
+         FROM bar_packages
+         WHERE bar_id = ? AND deleted_at IS NULL
+         ORDER BY created_at DESC`,
+        [barId]
+      );
+
+      // Fetch inclusions for each package
+      for (const pkg of packages) {
+        const [inclusions] = await pool.query(
+          `SELECT id, item_name, quantity
+           FROM package_inclusions
+           WHERE package_id = ?
+           ORDER BY id ASC`,
+          [pkg.id]
+        );
+        pkg.inclusions = inclusions;
+      }
+
+      return res.json({ success: true, data: packages });
+    } catch (err) {
+      console.error("LIST PACKAGES ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+// POST /owner/bar/packages — create a new package
+router.post(
+  "/bar/packages",
+  requireAuth,
+  requirePermission("menu_create"),
+  async (req, res) => {
+    const conn = await pool.getConnection();
+    try {
+      const barId = req.user.bar_id;
+      if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+      const { name, description, price, inclusions } = req.body || {};
+      if (!name) return res.status(400).json({ success: false, message: "Package name is required" });
+
+      await conn.beginTransaction();
+
+      // Create package
+      const [result] = await conn.query(
+        `INSERT INTO bar_packages (bar_id, name, description, price, is_active)
+         VALUES (?, ?, ?, ?, 1)`,
+        [barId, name, description || null, price || 0]
+      );
+
+      const packageId = result.insertId;
+
+      // Insert inclusions if provided
+      if (Array.isArray(inclusions) && inclusions.length > 0) {
+        const validInclusions = inclusions.filter(
+          (inc) => inc && inc.item_name && inc.item_name.trim()
+        );
+        if (validInclusions.length > 0) {
+          const inclusionRows = validInclusions.map((inc) => [
+            packageId,
+            String(inc.item_name).trim(),
+            Number(inc.quantity || 1),
+          ]);
+          await conn.query(
+            `INSERT INTO package_inclusions (package_id, item_name, quantity) VALUES ?`,
+            [inclusionRows]
+          );
+        }
+      }
+
+      await conn.commit();
+
+      logAudit(null, {
+        bar_id: barId,
+        user_id: req.user.id,
+        action: "CREATE_PACKAGE",
+        entity: "bar_packages",
+        entity_id: packageId,
+        details: { name, price, inclusions_count: inclusions?.length || 0 },
+        ...auditContext(req)
+      });
+
+      return res.status(201).json({ success: true, message: "Package created", data: { id: packageId } });
+    } catch (err) {
+      await conn.rollback();
+      console.error("CREATE PACKAGE ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    } finally {
+      conn.release();
+    }
+  }
+);
+
+// PATCH /owner/bar/packages/:id — update a package
+router.patch(
+  "/bar/packages/:id",
+  requireAuth,
+  requirePermission("menu_update"),
+  async (req, res) => {
+    const conn = await pool.getConnection();
+    try {
+      const barId = req.user.bar_id;
+      const id = Number(req.params.id);
+      if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+      if (!id) return res.status(400).json({ success: false, message: "Invalid id" });
+
+      const { name, description, price, is_active, inclusions } = req.body || {};
+
+      await conn.beginTransaction();
+
+      // Update package basic info
+      const updates = [];
+      const params = [];
+      if (name !== undefined) { updates.push("name = ?"); params.push(name); }
+      if (description !== undefined) { updates.push("description = ?"); params.push(description); }
+      if (price !== undefined) { updates.push("price = ?"); params.push(Number(price)); }
+      if (is_active !== undefined) { updates.push("is_active = ?"); params.push(is_active ? 1 : 0); }
+
+      if (updates.length > 0) {
+        updates.push("updated_at = NOW()");
+        params.push(id, barId);
+        const [result] = await conn.query(
+          `UPDATE bar_packages SET ${updates.join(", ")} WHERE id = ? AND bar_id = ? AND deleted_at IS NULL`,
+          params
+        );
+        if (!result.affectedRows) {
+          await conn.rollback();
+          return res.status(404).json({ success: false, message: "Package not found" });
+        }
+      }
+
+      // Update inclusions if provided
+      if (Array.isArray(inclusions)) {
+        // Delete existing inclusions
+        await conn.query("DELETE FROM package_inclusions WHERE package_id = ?", [id]);
+
+        // Insert new inclusions
+        const validInclusions = inclusions.filter(
+          (inc) => inc && inc.item_name && inc.item_name.trim()
+        );
+        if (validInclusions.length > 0) {
+          const inclusionRows = validInclusions.map((inc) => [
+            id,
+            String(inc.item_name).trim(),
+            Number(inc.quantity || 1),
+          ]);
+          await conn.query(
+            `INSERT INTO package_inclusions (package_id, item_name, quantity) VALUES ?`,
+            [inclusionRows]
+          );
+        }
+      }
+
+      await conn.commit();
+
+      logAudit(null, {
+        bar_id: barId,
+        user_id: req.user.id,
+        action: "UPDATE_PACKAGE",
+        entity: "bar_packages",
+        entity_id: id,
+        details: { fields_updated: Object.keys(req.body) },
+        ...auditContext(req)
+      });
+
+      return res.json({ success: true, message: "Package updated" });
+    } catch (err) {
+      await conn.rollback();
+      console.error("UPDATE PACKAGE ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    } finally {
+      conn.release();
+    }
+  }
+);
+
+// DELETE /owner/bar/packages/:id — soft delete a package
+router.delete(
+  "/bar/packages/:id",
+  requireAuth,
+  requirePermission("menu_delete"),
+  async (req, res) => {
+    try {
+      const barId = req.user.bar_id;
+      const id = Number(req.params.id);
+      if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+      const [result] = await pool.query(
+        "UPDATE bar_packages SET deleted_at = NOW(), is_active = 0 WHERE id = ? AND bar_id = ? AND deleted_at IS NULL",
+        [id, barId]
+      );
+
+      if (!result.affectedRows) return res.status(404).json({ success: false, message: "Package not found" });
+
+      logAudit(null, {
+        bar_id: barId,
+        user_id: req.user.id,
+        action: "DELETE_PACKAGE",
+        entity: "bar_packages",
+        entity_id: id,
+        details: {},
+        ...auditContext(req)
+      });
+
+      return res.json({ success: true, message: "Package deleted" });
+    } catch (err) {
+      console.error("DELETE PACKAGE ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
 
 module.exports = router;

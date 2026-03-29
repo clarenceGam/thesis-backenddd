@@ -7,6 +7,154 @@ const { logAudit } = require("../utils/audit");
 const { calculateAllDeductions } = require("../utils/deductionCalculator");
 
 /**
+ * GET PAYROLL SETTINGS
+ * GET /hr/payroll/settings
+ */
+router.get(
+  "/settings",
+  requireAuth,
+  requirePermission("payroll_view_all"),
+  async (req, res) => {
+    try {
+      const barId = getBarIdOr403(req, res);
+      if (!barId) return;
+
+      const [rows] = await pool.query(
+        `SELECT id, bar_id, sss_rate, philhealth_rate, pagibig_rate, 
+                withholding_tax_rate, minimum_wage, updated_at
+         FROM payroll_settings
+         WHERE bar_id = ?
+         LIMIT 1`,
+        [barId]
+      );
+
+      if (rows.length === 0) {
+        // Return default values if no settings exist yet
+        return res.json({
+          success: true,
+          data: {
+            bar_id: barId,
+            sss_rate: 4.50,
+            philhealth_rate: 3.00,
+            pagibig_rate: 2.00,
+            withholding_tax_rate: 0.00,
+            minimum_wage: 610.00,
+            updated_at: null
+          }
+        });
+      }
+
+      return res.json({ success: true, data: rows[0] });
+    } catch (err) {
+      console.error("GET PAYROLL SETTINGS ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+/**
+ * UPDATE PAYROLL SETTINGS
+ * PUT /hr/payroll/settings
+ */
+router.put(
+  "/settings",
+  requireAuth,
+  requirePermission("payroll_create"),
+  async (req, res) => {
+    try {
+      const barId = getBarIdOr403(req, res);
+      if (!barId) return;
+
+      const {
+        sss_rate,
+        philhealth_rate,
+        pagibig_rate,
+        withholding_tax_rate,
+        minimum_wage
+      } = req.body;
+
+      // Validate rates
+      if (
+        sss_rate == null ||
+        philhealth_rate == null ||
+        pagibig_rate == null ||
+        withholding_tax_rate == null ||
+        minimum_wage == null
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "All fields are required"
+        });
+      }
+
+      // Check if settings exist
+      const [existing] = await pool.query(
+        "SELECT id FROM payroll_settings WHERE bar_id = ?",
+        [barId]
+      );
+
+      if (existing.length > 0) {
+        // Update existing settings
+        await pool.query(
+          `UPDATE payroll_settings
+           SET sss_rate = ?, philhealth_rate = ?, pagibig_rate = ?,
+               withholding_tax_rate = ?, minimum_wage = ?, updated_at = NOW()
+           WHERE bar_id = ?`,
+          [
+            sss_rate,
+            philhealth_rate,
+            pagibig_rate,
+            withholding_tax_rate,
+            minimum_wage,
+            barId
+          ]
+        );
+      } else {
+        // Insert new settings
+        await pool.query(
+          `INSERT INTO payroll_settings
+           (bar_id, sss_rate, philhealth_rate, pagibig_rate,
+            withholding_tax_rate, minimum_wage)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            barId,
+            sss_rate,
+            philhealth_rate,
+            pagibig_rate,
+            withholding_tax_rate,
+            minimum_wage
+          ]
+        );
+      }
+
+      // Log audit
+      await logAudit(
+        barId,
+        req.user.id,
+        "UPDATE_PAYROLL_SETTINGS",
+        "payroll_settings",
+        existing.length > 0 ? existing[0].id : null,
+        {
+          sss_rate,
+          philhealth_rate,
+          pagibig_rate,
+          withholding_tax_rate,
+          minimum_wage
+        }
+      );
+
+      return res.json({
+        success: true,
+        message: "Payroll settings updated successfully"
+      });
+    } catch (err) {
+      console.error("UPDATE PAYROLL SETTINGS ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+/**
  * Helpers
  */
 function getBarIdOr403(req, res) {

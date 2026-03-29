@@ -214,7 +214,8 @@ router.get("/bars/:id", async (req, res) => {
               b.monday_hours, b.tuesday_hours, b.wednesday_hours,
               b.thursday_hours, b.friday_hours, b.saturday_hours, b.sunday_hours,
               b.accept_cash_payment, b.accept_online_payment, b.accept_gcash,
-              b.minimum_reservation_deposit
+              b.minimum_reservation_deposit,
+              b.bar_types, b.staff_types
        FROM bars b
        WHERE b.id = ? AND b.status = 'active'${banFilter}
        LIMIT 1`,
@@ -453,6 +454,47 @@ router.get("/bars/:id/tables", async (req, res) => {
     return res.json({ success: true, data: rows });
   } catch (err) {
     console.error("PUBLIC BAR TABLES ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
+// ─── PUBLIC: Get bar packages with inclusions ───
+router.get("/bars/:id/packages", async (req, res) => {
+  try {
+    const barId = Number(req.params.id);
+    if (!barId) return res.status(400).json({ success: false, message: "Invalid bar ID" });
+
+    // Verify bar is active
+    const [barCheck] = await pool.query(
+      "SELECT id FROM bars WHERE id = ? AND status = 'active' LIMIT 1",
+      [barId]
+    );
+    if (!barCheck.length) return res.status(404).json({ success: false, message: "Bar not found" });
+
+    // Fetch packages
+    const [packages] = await pool.query(
+      `SELECT id, name, description, price, created_at
+       FROM bar_packages
+       WHERE bar_id = ? AND is_active = 1 AND deleted_at IS NULL
+       ORDER BY created_at DESC`,
+      [barId]
+    );
+
+    // Fetch inclusions for each package
+    for (const pkg of packages) {
+      const [inclusions] = await pool.query(
+        `SELECT id, item_name, quantity
+         FROM package_inclusions
+         WHERE package_id = ?
+         ORDER BY id ASC`,
+        [pkg.id]
+      );
+      pkg.inclusions = inclusions;
+    }
+
+    return res.json({ success: true, data: packages });
+  } catch (err) {
+    console.error("PUBLIC BAR PACKAGES ERROR:", err);
     return res.status(500).json({ success: false, message: "Server error" });
   }
 });

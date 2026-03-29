@@ -669,4 +669,211 @@ router.delete(
   }
 );
 
+// ═══════════════════════════════════════════════════
+// INVENTORY REQUEST WORKFLOW
+// ═══════════════════════════════════════════════════
+
+// STAFF - Submit inventory request
+router.post(
+  "/owner/inventory/requests",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const barId = req.user.bar_id;
+      const userId = req.user.id;
+      if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+      const { item_name, quantity_needed, unit, reason } = req.body || {};
+      if (!item_name || !quantity_needed) {
+        return res.status(400).json({ success: false, message: "item_name and quantity_needed are required" });
+      }
+
+      const [result] = await pool.query(
+        `INSERT INTO inventory_requests (bar_id, requester_id, item_name, quantity_needed, unit, reason, status)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+        [barId, userId, item_name, Number(quantity_needed), unit || 'Piece', reason || null]
+      );
+
+      logAudit(null, {
+        bar_id: barId,
+        user_id: userId,
+        action: "SUBMIT_INVENTORY_REQUEST",
+        entity: "inventory_requests",
+        entity_id: result.insertId,
+        details: { item_name, quantity_needed, unit },
+        ...auditContext(req)
+      });
+
+      return res.status(201).json({ success: true, message: "Inventory request submitted", data: { id: result.insertId } });
+    } catch (err) {
+      console.error("SUBMIT INVENTORY REQUEST ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+// STAFF - Get own inventory requests
+router.get(
+  "/owner/inventory/requests/my",
+  requireAuth,
+  async (req, res) => {
+    try {
+      const userId = req.user.id;
+      const barId = req.user.bar_id;
+      if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+      const [rows] = await pool.query(
+        `SELECT ir.id, ir.item_name, ir.quantity_needed, ir.unit, ir.reason, ir.status,
+                ir.rejection_note, ir.created_at, ir.reviewed_at,
+                u.first_name AS reviewer_first_name, u.last_name AS reviewer_last_name
+         FROM inventory_requests ir
+         LEFT JOIN users u ON ir.reviewed_by = u.id
+         WHERE ir.requester_id = ? AND ir.bar_id = ?
+         ORDER BY ir.created_at DESC`,
+        [userId, barId]
+      );
+
+      return res.json({ success: true, data: rows });
+    } catch (err) {
+      console.error("GET MY INVENTORY REQUESTS ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+// OWNER - Get all inventory requests (with filter by status)
+router.get(
+  "/owner/inventory/requests",
+  requireAuth,
+  requirePermission("menu_view"),
+  async (req, res) => {
+    try {
+      const barId = req.user.bar_id;
+      if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+      const status = req.query.status; // optional filter: pending, approved, rejected
+      let query = `
+        SELECT ir.id, ir.item_name, ir.quantity_needed, ir.unit, ir.reason, ir.status,
+               ir.rejection_note, ir.created_at, ir.reviewed_at,
+               u.first_name AS requester_first_name, u.last_name AS requester_last_name,
+               reviewer.first_name AS reviewer_first_name, reviewer.last_name AS reviewer_last_name
+        FROM inventory_requests ir
+        JOIN users u ON ir.requester_id = u.id
+        LEFT JOIN users reviewer ON ir.reviewed_by = reviewer.id
+        WHERE ir.bar_id = ?`;
+      
+      const params = [barId];
+      if (status && ['pending', 'approved', 'rejected'].includes(status)) {
+        query += ` AND ir.status = ?`;
+        params.push(status);
+      }
+      
+      query += ` ORDER BY 
+        CASE ir.status 
+          WHEN 'pending' THEN 1 
+          WHEN 'approved' THEN 2 
+          WHEN 'rejected' THEN 3 
+        END, ir.created_at DESC`;
+
+      const [rows] = await pool.query(query, params);
+
+      return res.json({ success: true, data: rows });
+    } catch (err) {
+      console.error("GET INVENTORY REQUESTS ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+// OWNER - Approve inventory request
+router.post(
+  "/owner/inventory/requests/:id/approve",
+  requireAuth,
+  requirePermission("menu_update"),
+  async (req, res) => {
+    try {
+      const barId = req.user.bar_id;
+      const userId = req.user.id;
+      const requestId = Number(req.params.id);
+      if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+      // Verify request belongs to this bar and is pending
+      const [existing] = await pool.query(
+        "SELECT id, item_name, quantity_needed, unit FROM inventory_requests WHERE id = ? AND bar_id = ? AND status = 'pending' LIMIT 1",
+        [requestId, barId]
+      );
+      if (!existing.length) {
+        return res.status(404).json({ success: false, message: "Request not found or already processed" });
+      }
+
+      // Update request status
+      await pool.query(
+        "UPDATE inventory_requests SET status = 'approved', reviewed_by = ?, reviewed_at = NOW() WHERE id = ?",
+        [userId, requestId]
+      );
+
+      logAudit(null, {
+        bar_id: barId,
+        user_id: userId,
+        action: "APPROVE_INVENTORY_REQUEST",
+        entity: "inventory_requests",
+        entity_id: requestId,
+        details: { item_name: existing[0].item_name, quantity_needed: existing[0].quantity_needed },
+        ...auditContext(req)
+      });
+
+      return res.json({ success: true, message: "Request approved" });
+    } catch (err) {
+      console.error("APPROVE INVENTORY REQUEST ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+// OWNER - Reject inventory request
+router.post(
+  "/owner/inventory/requests/:id/reject",
+  requireAuth,
+  requirePermission("menu_update"),
+  async (req, res) => {
+    try {
+      const barId = req.user.bar_id;
+      const userId = req.user.id;
+      const requestId = Number(req.params.id);
+      const { rejection_note } = req.body || {};
+      if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+      // Verify request belongs to this bar and is pending
+      const [existing] = await pool.query(
+        "SELECT id, item_name FROM inventory_requests WHERE id = ? AND bar_id = ? AND status = 'pending' LIMIT 1",
+        [requestId, barId]
+      );
+      if (!existing.length) {
+        return res.status(404).json({ success: false, message: "Request not found or already processed" });
+      }
+
+      // Update request status
+      await pool.query(
+        "UPDATE inventory_requests SET status = 'rejected', reviewed_by = ?, reviewed_at = NOW(), rejection_note = ? WHERE id = ?",
+        [userId, rejection_note || null, requestId]
+      );
+
+      logAudit(null, {
+        bar_id: barId,
+        user_id: userId,
+        action: "REJECT_INVENTORY_REQUEST",
+        entity: "inventory_requests",
+        entity_id: requestId,
+        details: { item_name: existing[0].item_name, rejection_note },
+        ...auditContext(req)
+      });
+
+      return res.json({ success: true, message: "Request rejected" });
+    } catch (err) {
+      console.error("REJECT INVENTORY REQUEST ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
 module.exports = router;

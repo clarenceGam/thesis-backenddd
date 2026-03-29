@@ -65,8 +65,8 @@ router.post("/subscribe", requireAuth, async (req, res) => {
         const sourceType = payment_method === 'paymaya' ? 'grab_pay' : payment_method;
         const source = await paymongoService.createSource(plan.price, sourceType, {
           description: `${plan.display_name} Subscription - ${plan.billing_period}`,
-          success_url: `${process.env.FRONTEND_URL}/subscription/success?ref=${referenceId}`,
-          failed_url: `${process.env.FRONTEND_URL}/subscription/failed?ref=${referenceId}`,
+          success_url: `${process.env.BAR_OWNER_APP_URL || 'https://baroperations.thepartygoers.fun'}/subscription/success?ref=${referenceId}`,
+          failed_url: `${process.env.BAR_OWNER_APP_URL || 'https://baroperations.thepartygoers.fun'}/subscription/failed?ref=${referenceId}`,
         });
         checkoutUrl = source.attributes.redirect.checkout_url;
         paymongoSourceId = source.id;
@@ -210,8 +210,8 @@ router.post("/renew", requireAuth, async (req, res) => {
       if (payment_method === 'gcash' || payment_method === 'paymaya') {
         const source = await paymongoService.createSource(amount, payment_method, {
           description: `Renew ${currentSub.display_name} Subscription`,
-          success_url: `${process.env.FRONTEND_URL}/subscription/success?ref=${referenceId}`,
-          failed_url: `${process.env.FRONTEND_URL}/subscription/failed?ref=${referenceId}`,
+          success_url: `${process.env.BAR_OWNER_APP_URL || 'https://baroperations.thepartygoers.fun'}/subscription/success?ref=${referenceId}`,
+          failed_url: `${process.env.BAR_OWNER_APP_URL || 'https://baroperations.thepartygoers.fun'}/subscription/failed?ref=${referenceId}`,
         });
         checkoutUrl = source.attributes.redirect.checkout_url;
         paymongoSourceId = source.id;

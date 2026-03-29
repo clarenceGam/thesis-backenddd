@@ -1213,7 +1213,9 @@ router.post(
         first_name, middle_name, last_name, email, password, phone_number,
         // Step 2 — Bar Details
         bar_name, bar_address, bar_city, bar_barangay, bar_types, bar_description,
-        opening_time, closing_time, gcash_number, gcash_name
+        opening_time, closing_time, gcash_number, gcash_name,
+        // Step 3 — Documents (OCR extracted)
+        permit_expiry_date
       } = req.body || {};
 
       // --- Validation ---

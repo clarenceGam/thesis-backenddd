@@ -15,13 +15,18 @@ async function getMaintenanceState(pool) {
 
   try {
     const [rows] = await pool.query(
-      "SELECT maintenance_mode, maintenance_message FROM platform_settings WHERE id = 1 LIMIT 1"
+      `SELECT setting_key, setting_value
+       FROM platform_settings
+       WHERE setting_key IN ('maintenance_mode', 'maintenance_message')`
     );
-    const row = rows[0] || {};
+    const settingsMap = rows.reduce((acc, row) => {
+      acc[row.setting_key] = row.setting_value;
+      return acc;
+    }, {});
     maintenanceCache = {
       expiresAt: now + 15000,
-      maintenanceMode: Number(row.maintenance_mode || 0) === 1,
-      maintenanceMessage: String(row.maintenance_message || "").trim(),
+      maintenanceMode: Number(settingsMap.maintenance_mode || 0) === 1,
+      maintenanceMessage: String(settingsMap.maintenance_message || "").trim(),
     };
   } catch (_) {
     // Keep the app operational even if platform_settings does not exist yet.
@@ -81,7 +86,28 @@ async function requireAuth(req, res, next) {
     }
 
     const roleName = String(rows[0].role_name || rows[0].role || "").toUpperCase();
+    
+    // Check if user is globally banned (only for non-super-admins)
     if (roleName !== "SUPER_ADMIN") {
+      // Check for global ban
+      try {
+        const [banCheck] = await pool.query(
+          "SELECT is_banned, ban_reason FROM users WHERE id = ? LIMIT 1",
+          [decoded.id]
+        );
+        if (banCheck.length && Number(banCheck[0].is_banned || 0) === 1) {
+          const banReason = String(banCheck[0].ban_reason || "").trim();
+          return res.status(403).json({
+            success: false,
+            code: "USER_BANNED",
+            message: banReason || "Your account has been banned from the platform.",
+          });
+        }
+      } catch (banErr) {
+        // Column might not exist, continue
+      }
+      
+      // Check maintenance mode
       const { maintenanceMode, maintenanceMessage } = await getMaintenanceState(pool);
       if (maintenanceMode) {
         return res.status(503).json({

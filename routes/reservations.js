@@ -215,6 +215,30 @@ async function hasReservationEventIdColumn() {
   return _hasReservationEventIdColumnCache;
 }
 
+let _reservationReviewsTableReady = false;
+async function ensureReservationReviewsTable() {
+  if (_reservationReviewsTableReady) return;
+
+  await pool.query(
+    `CREATE TABLE IF NOT EXISTS reservation_reviews (
+      id INT(11) NOT NULL AUTO_INCREMENT,
+      reservation_id INT(11) NOT NULL,
+      bar_id INT(11) NOT NULL,
+      customer_id INT(11) NOT NULL,
+      rating TINYINT(1) NOT NULL,
+      comment TEXT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uq_reservation_reviews_reservation (reservation_id),
+      KEY idx_reservation_reviews_customer (customer_id),
+      KEY idx_reservation_reviews_bar (bar_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
+  );
+
+  _reservationReviewsTableReady = true;
+}
+
 function getOptionalUserId(req) {
   try {
     const authHeader = req.headers.authorization || "";
@@ -787,11 +811,17 @@ router.get(
     try {
       const customerId = req.user.id;
 
+      await ensureReservationReviewsTable();
+
       const [rows] = await pool.query(
-        `SELECT r.id, r.transaction_number, r.bar_id, b.name AS bar_name, r.table_id, t.table_number,
+        `SELECT r.id, r.transaction_number, r.bar_id, b.name AS bar_name, b.address AS bar_address,
+                r.table_id, t.table_number,
                 r.reservation_date, r.reservation_time, r.party_size,
-                r.status, r.payment_status, r.notes, r.paid_at, r.checked_in_at, r.no_show_at, r.created_at,
-                pt.reference_id, pt.payment_method
+                r.status, r.payment_status, r.notes, r.deposit_amount,
+                r.paid_at, r.checked_in_at, r.no_show_at, r.created_at,
+                pt.reference_id, pt.payment_method, pt.amount AS payment_amount,
+                rr.id AS review_id, rr.rating AS review_rating, rr.comment AS review_comment,
+                CASE WHEN rr.id IS NULL THEN 0 ELSE 1 END AS has_review
          FROM reservations r
          JOIN bars b ON b.id = r.bar_id
          JOIN bar_tables t ON t.id = r.table_id
@@ -800,6 +830,7 @@ router.get(
            WHERE payment_type = 'reservation' AND related_id = r.id
            ORDER BY created_at DESC LIMIT 1
          )
+         LEFT JOIN reservation_reviews rr ON rr.reservation_id = r.id
          WHERE r.customer_user_id=?
          ORDER BY r.created_at DESC
          LIMIT 200`,
@@ -810,6 +841,111 @@ router.get(
     } catch (err) {
       console.error("MY RESERVATIONS ERROR:", err);
       return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+// GET /reservations/my/reviews (customer)
+router.get(
+  "/reservations/my/reviews",
+  requireAuth,
+  requireRole([USER_ROLES.CUSTOMER]),
+  async (req, res) => {
+    try {
+      const customerId = req.user.id;
+      await ensureReservationReviewsTable();
+
+      const [rows] = await pool.query(
+        `SELECT id, reservation_id, bar_id, rating, comment, created_at, updated_at
+         FROM reservation_reviews
+         WHERE customer_id = ?
+         ORDER BY created_at DESC
+         LIMIT 500`,
+        [customerId]
+      );
+
+      return res.json({ success: true, data: rows });
+    } catch (err) {
+      console.error("MY RESERVATION REVIEWS ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+// POST /reservations/:id/reviews (customer)
+router.post(
+  "/reservations/:id/reviews",
+  requireAuth,
+  requireRole([USER_ROLES.CUSTOMER]),
+  async (req, res) => {
+    const conn = await pool.getConnection();
+    try {
+      const customerId = req.user.id;
+      const reservationId = Number(req.params.id);
+      const { rating, comment } = req.body || {};
+
+      if (!reservationId) {
+        return res.status(400).json({ success: false, message: "Invalid reservation id" });
+      }
+
+      const ratingNum = Number(rating);
+      if (!Number.isFinite(ratingNum) || ratingNum < 1 || ratingNum > 5) {
+        return res.status(400).json({ success: false, message: "Rating must be between 1 and 5" });
+      }
+
+      await ensureReservationReviewsTable();
+
+      const [reservationRows] = await conn.query(
+        `SELECT id, bar_id, status
+         FROM reservations
+         WHERE id = ? AND customer_user_id = ?
+         LIMIT 1`,
+        [reservationId, customerId]
+      );
+
+      if (!reservationRows.length) {
+        return res.status(404).json({ success: false, message: "Reservation not found" });
+      }
+
+      const reservation = reservationRows[0];
+      if (String(reservation.status || "").toLowerCase() !== "completed") {
+        return res.status(400).json({ success: false, message: "You can only review completed bookings." });
+      }
+
+      const [existingRows] = await conn.query(
+        `SELECT id
+         FROM reservation_reviews
+         WHERE reservation_id = ?
+         LIMIT 1`,
+        [reservationId]
+      );
+
+      if (existingRows.length) {
+        return res.status(409).json({ success: false, message: "You have already reviewed this booking." });
+      }
+
+      const [insertResult] = await conn.query(
+        `INSERT INTO reservation_reviews (reservation_id, bar_id, customer_id, rating, comment)
+         VALUES (?, ?, ?, ?, ?)`,
+        [reservationId, reservation.bar_id, customerId, ratingNum, comment ? String(comment).trim() : null]
+      );
+
+      return res.status(201).json({
+        success: true,
+        message: "Review submitted",
+        data: {
+          id: insertResult.insertId,
+          reservation_id: reservationId,
+          bar_id: reservation.bar_id,
+          rating: ratingNum,
+          comment: comment ? String(comment).trim() : null,
+        },
+      });
+    } catch (err) {
+      console.error("CREATE RESERVATION REVIEW ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    } finally {
+      conn.release();
     }
   }
 );
