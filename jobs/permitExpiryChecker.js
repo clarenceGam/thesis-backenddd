@@ -28,7 +28,8 @@ async function checkPermitExpiry() {
     const [expiringSoon] = await conn.query(
       `SELECT b.id, b.name, b.permit_expiry_date, u.email, u.first_name, u.last_name
        FROM bars b
-       JOIN users u ON b.owner_user_id = u.id
+       JOIN bar_owners bo ON b.owner_id = bo.id
+       JOIN users u ON bo.user_id = u.id
        WHERE b.permit_expiry_date = ?
          AND b.permit_status != 'expired'
          AND (b.permit_expiry_notified_at IS NULL 
@@ -70,7 +71,8 @@ async function checkPermitExpiry() {
     const [expiredToday] = await conn.query(
       `SELECT b.id, b.name, b.permit_expiry_date, u.email, u.first_name, u.last_name
        FROM bars b
-       JOIN users u ON b.owner_user_id = u.id
+       JOIN bar_owners bo ON b.owner_id = bo.id
+       JOIN users u ON bo.user_id = u.id
        WHERE b.permit_expiry_date <= ?
          AND b.permit_status != 'expired'`,
       [todayStr]
