@@ -1,5 +1,5 @@
 const pool = require('../config/database');
-const { sendEmail } = require('../utils/email');
+const { sendEmail } = require('../utils/emailService');
 
 /**
  * Permit Expiry Checker Job
