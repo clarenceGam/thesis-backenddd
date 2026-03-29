@@ -1855,10 +1855,29 @@ router.get("/registrations", async (req, res) => {
       dataParams
     );
 
+    // Transform document URLs to use production backend URL
+    const backendUrl = process.env.BACKEND_URL || 'https://api.thepartygoers.fun';
+    const transformedRows = rows.map(row => {
+      const transformed = { ...row };
+      
+      // Fix document URLs if they contain localhost
+      if (row.bir_certificate && row.bir_certificate.includes('localhost')) {
+        transformed.bir_certificate = row.bir_certificate.replace(/http:\/\/localhost:\d+/, backendUrl);
+      }
+      if (row.business_permit && row.business_permit.includes('localhost')) {
+        transformed.business_permit = row.business_permit.replace(/http:\/\/localhost:\d+/, backendUrl);
+      }
+      if (row.selfie_with_id && row.selfie_with_id.includes('localhost')) {
+        transformed.selfie_with_id = row.selfie_with_id.replace(/http:\/\/localhost:\d+/, backendUrl);
+      }
+      
+      return transformed;
+    });
+
     return res.json({
       success: true,
       data: {
-        registrations: rows,
+        registrations: transformedRows,
         pagination: {
           page,
           limit,

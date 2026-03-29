@@ -10,7 +10,7 @@ const { runPermitExpiryCheck } = require('../jobs/permitExpiryChecker');
  * GET /permit-monitoring/expiring
  * Get all bars with expired or soon-to-expire permits
  */
-router.get('/expiring', requireAuth, async (req, res) => {
+router.get('/expiring', requireAuth, requireSuperAdmin, async (req, res) => {
   try {
     const { status, limit = 100, page = 1 } = req.query;
     const offset = (page - 1) * limit;
@@ -85,7 +85,7 @@ router.get('/expiring', requireAuth, async (req, res) => {
  * GET /permit-monitoring/stats
  * Get permit expiry statistics
  */
-router.get('/stats', requireAuth, async (req, res) => {
+router.get('/stats', requireAuth, requireSuperAdmin, async (req, res) => {
   try {
     const [stats] = await pool.query(`
       SELECT 
@@ -257,7 +257,7 @@ router.post('/reactivate/:barId', requireAuth, requireSuperAdmin, async (req, re
  * POST /permit-monitoring/run-check
  * Manually trigger permit expiry check (for testing)
  */
-router.post('/run-check', requireAuth, async (req, res) => {
+router.post('/run-check', requireAuth, requireSuperAdmin, async (req, res) => {
   try {
     const result = await runPermitExpiryCheck();
     return res.json({
