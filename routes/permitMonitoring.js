@@ -55,7 +55,8 @@ router.get('/expiring', requireAuth, async (req, res) => {
         (SELECT COUNT(*) FROM permit_expiry_notifications 
          WHERE bar_id = b.id AND notification_type = '30_day_warning') as warning_count
        FROM bars b
-       LEFT JOIN users u ON b.owner_user_id = u.id
+       LEFT JOIN bar_owners bo ON b.owner_id = bo.id
+       LEFT JOIN users u ON bo.user_id = u.id
        ${whereClause}
        ORDER BY b.permit_expiry_date ASC
        LIMIT ? OFFSET ?`,
@@ -84,7 +85,7 @@ router.get('/expiring', requireAuth, async (req, res) => {
  * GET /permit-monitoring/stats
  * Get permit expiry statistics
  */
-router.get('/stats', requireAuth, requireSuperAdmin, async (req, res) => {
+router.get('/stats', requireAuth, async (req, res) => {
   try {
     const [stats] = await pool.query(`
       SELECT 
