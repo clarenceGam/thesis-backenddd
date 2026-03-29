@@ -1965,6 +1965,51 @@ router.get(
   }
 );
 
+// Helper function to validate event time against bar operating hours
+function isEventWithinOperatingHours(eventDate, startTime, endTime, operatingHours) {
+  if (!operatingHours || !startTime || !endTime) return true; // Skip validation if data missing
+  
+  try {
+    const eventDay = new Date(eventDate).toLocaleDateString('en-US', { weekday: 'long' });
+    const hours = typeof operatingHours === 'string' ? JSON.parse(operatingHours) : operatingHours;
+    
+    if (!hours || typeof hours !== 'object') return true;
+    
+    const daySchedule = hours[eventDay];
+    if (!daySchedule || daySchedule.closed) {
+      return { valid: false, message: `Bar is closed on ${eventDay}` };
+    }
+    
+    const barOpen = daySchedule.open;
+    const barClose = daySchedule.close;
+    
+    if (!barOpen || !barClose) return true;
+    
+    // Convert times to minutes for comparison
+    const toMinutes = (time) => {
+      const [hours, minutes] = time.split(':').map(Number);
+      return hours * 60 + minutes;
+    };
+    
+    const eventStart = toMinutes(startTime);
+    const eventEnd = toMinutes(endTime);
+    const barOpenMin = toMinutes(barOpen);
+    const barCloseMin = toMinutes(barClose);
+    
+    if (eventStart < barOpenMin || eventEnd > barCloseMin) {
+      return { 
+        valid: false, 
+        message: `Event time (${startTime} - ${endTime}) is outside bar operating hours (${barOpen} - ${barClose}) on ${eventDay}`
+      };
+    }
+    
+    return { valid: true };
+  } catch (err) {
+    console.error('Operating hours validation error:', err);
+    return true; // Don't block on validation errors
+  }
+}
+
 router.post(
   "/bar/events",
   requireAuth,
@@ -1976,6 +2021,15 @@ router.post(
 
       const { title, description, event_date, start_time, end_time, entry_price, max_capacity } = req.body || {};
       if (!title || !event_date) return res.status(400).json({ success: false, message: "title and event_date required" });
+
+      // Get bar operating hours
+      const [barData] = await pool.query('SELECT operating_hours FROM bars WHERE id = ?', [barId]);
+      if (barData.length > 0) {
+        const validation = isEventWithinOperatingHours(event_date, start_time, end_time, barData[0].operating_hours);
+        if (validation && !validation.valid) {
+          return res.status(400).json({ success: false, message: validation.message });
+        }
+      }
 
       const [result] = await pool.query(
         `INSERT INTO bar_events (bar_id, title, description, event_date, start_time, end_time, entry_price, max_capacity, status)
@@ -2007,6 +2061,28 @@ router.patch(
       const id = Number(req.params.id);
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
       if (!id) return res.status(400).json({ success: false, message: "Invalid id" });
+
+      // If updating event time, validate against operating hours
+      if (req.body.event_date || req.body.start_time || req.body.end_time) {
+        const [existingEvent] = await pool.query(
+          'SELECT event_date, start_time, end_time FROM bar_events WHERE id = ? AND bar_id = ?',
+          [id, barId]
+        );
+        
+        if (existingEvent.length > 0) {
+          const eventDate = req.body.event_date || existingEvent[0].event_date;
+          const startTime = req.body.start_time || existingEvent[0].start_time;
+          const endTime = req.body.end_time || existingEvent[0].end_time;
+          
+          const [barData] = await pool.query('SELECT operating_hours FROM bars WHERE id = ?', [barId]);
+          if (barData.length > 0) {
+            const validation = isEventWithinOperatingHours(eventDate, startTime, endTime, barData[0].operating_hours);
+            if (validation && !validation.valid) {
+              return res.status(400).json({ success: false, message: validation.message });
+            }
+          }
+        }
+      }
 
       const allowed = ["title", "description", "event_date", "start_time", "end_time", "entry_price", "max_capacity", "status"];
       const updates = [];
