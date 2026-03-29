@@ -52,6 +52,10 @@ const permitMonitoringRoutes = require('./routes/permitMonitoring');
 
 const app = express();
 
+// Behind Nginx/Cloudflare in production: trust first proxy so rate limiting
+// and req.ip use X-Forwarded-For correctly.
+app.set("trust proxy", Number(process.env.TRUST_PROXY || 1));
+
 // ── Security headers (helmet) ──────────────────────────────────────────────
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow serving uploads cross-origin
