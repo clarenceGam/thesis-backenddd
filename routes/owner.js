@@ -2925,4 +2925,54 @@ router.delete(
   }
 );
 
+// ─── OWNER: Change own password ───
+router.post("/change-password", requireAuth, requireRole(USER_ROLES.BAR_OWNER), async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { currentPassword, newPassword } = req.body || {};
+
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ success: false, message: "Current password and new password are required" });
+    }
+
+    if (String(newPassword).length < 6) {
+      return res.status(400).json({ success: false, message: "New password must be at least 6 characters" });
+    }
+
+    if (String(currentPassword).length > 128 || String(newPassword).length > 128) {
+      return res.status(400).json({ success: false, message: "Password must be 128 characters or less" });
+    }
+
+    // Verify current password
+    const [rows] = await pool.query("SELECT password FROM users WHERE id = ? LIMIT 1", [userId]);
+    if (!rows.length) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const isValid = await bcrypt.compare(currentPassword, rows[0].password);
+    if (!isValid) {
+      return res.status(401).json({ success: false, message: "Current password is incorrect" });
+    }
+
+    // Hash new password and update
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+    await pool.query("UPDATE users SET password = ?, updated_at = NOW() WHERE id = ?", [hashedPassword, userId]);
+
+    await logAudit({
+      user_id: userId,
+      bar_id: req.user.bar_id,
+      action: "CHANGE_PASSWORD",
+      entity: "user",
+      entity_id: userId,
+      details: { message: "Bar owner changed their own password" },
+      ...auditContext(req),
+    });
+
+    return res.json({ success: true, message: "Password changed successfully" });
+  } catch (err) {
+    console.error("OWNER CHANGE PASSWORD ERROR:", err);
+    return res.status(500).json({ success: false, message: "Server error" });
+  }
+});
+
 module.exports = router;

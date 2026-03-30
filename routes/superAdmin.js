@@ -1963,8 +1963,8 @@ router.post("/registrations/:id/approve", async (req, res) => {
     let barIns;
     try {
       [barIns] = await conn.query(
-        `INSERT INTO bars (name, address, city, state, zip_code, phone, email, category, bar_types, reservation_time_limit_mode, reservation_time_limit_minutes, owner_id, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW())`,
+        `INSERT INTO bars (name, address, city, state, zip_code, phone, email, category, bar_types, reservation_time_limit_mode, reservation_time_limit_minutes, gcash_number, gcash_account_name, owner_id, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NOW(), NOW())`,
         [
           reg.business_name,
           reg.business_address,
@@ -1977,6 +1977,8 @@ router.post("/registrations/:id/approve", async (req, res) => {
           barTypesValue,
           timeLimitMode,
           timeLimitMinutes,
+          reg.gcash_number || null,
+          reg.gcash_name || null,
           boIns.insertId
         ]
       );
