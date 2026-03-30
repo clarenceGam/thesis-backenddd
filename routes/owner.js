@@ -642,7 +642,12 @@ router.get(
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
       const includeReservationMode = await hasReservationModeColumn();
-      const includeTimeLimits = await hasReservationTimeLimitColumns();
+      let includeTimeLimits = false;
+      try {
+        includeTimeLimits = await hasReservationTimeLimitColumns();
+      } catch (err) {
+        console.warn("Error checking time limit columns:", err);
+      }
       const reservationModeSelect = includeReservationMode
         ? ", reservation_mode"
         : ", 'manual_approval' AS reservation_mode";
@@ -689,6 +694,12 @@ router.patch(
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
       const includeReservationMode = await hasReservationModeColumn();
+      let includeTimeLimits = false;
+      try {
+        includeTimeLimits = await hasReservationTimeLimitColumns();
+      } catch (err) {
+        console.warn("Error checking time limit columns:", err);
+      }
 
       const allowed = [
         "name", "description", "address", "city", "state", "zip_code",
