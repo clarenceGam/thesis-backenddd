@@ -111,27 +111,60 @@ async function buildReservationLineItems(conn, reservation) {
     });
   }
 
-  const parsedItems = parseReservationOrderItems(reservation.notes);
-  for (const it of parsedItems) {
-    const [menuRows] = await conn.query(
-      `SELECT selling_price
-       FROM menu_items
-       WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?)
-       ORDER BY id DESC
-       LIMIT 1`,
-      [reservation.bar_id, it.name]
+  // First try to fetch from reservation_items table
+  const [riCheck] = await conn.query(
+    `SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'reservation_items' LIMIT 1`
+  );
+
+  if (riCheck.length) {
+    const [reservationItems] = await conn.query(
+      `SELECT ri.menu_item_id, m.menu_name, ri.quantity, ri.unit_price,
+              (ri.quantity * ri.unit_price) AS line_total
+       FROM reservation_items ri
+       JOIN menu_items m ON m.id = ri.menu_item_id
+       WHERE ri.reservation_id = ?
+       ORDER BY m.menu_name`,
+      [reservation.id]
     );
-    const unitPrice = Number(menuRows[0]?.selling_price || 0);
-    lineItems.push({
-      item_type: "menu",
-      item_name: it.name,
-      quantity: Number(it.quantity || 1),
-      unit_price: unitPrice,
-      line_total: unitPrice * Number(it.quantity || 1),
-      metadata: {
-        reservation_id: reservation.id,
-      },
-    });
+
+    for (const item of reservationItems) {
+      lineItems.push({
+        item_type: "menu",
+        item_name: item.menu_name,
+        quantity: Number(item.quantity || 1),
+        unit_price: Number(item.unit_price || 0),
+        line_total: Number(item.line_total || 0),
+        metadata: {
+          reservation_id: reservation.id,
+          menu_item_id: item.menu_item_id,
+        },
+      });
+    }
+  } else {
+    // Fallback: parse from notes if reservation_items table doesn't exist
+    const parsedItems = parseReservationOrderItems(reservation.notes);
+    for (const it of parsedItems) {
+      const [menuRows] = await conn.query(
+        `SELECT selling_price
+         FROM menu_items
+         WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?)
+         ORDER BY id DESC
+         LIMIT 1`,
+        [reservation.bar_id, it.name]
+      );
+      const unitPrice = Number(menuRows[0]?.selling_price || 0);
+      lineItems.push({
+        item_type: "menu",
+        item_name: it.name,
+        quantity: Number(it.quantity || 1),
+        unit_price: unitPrice,
+        line_total: unitPrice * Number(it.quantity || 1),
+        metadata: {
+          reservation_id: reservation.id,
+        },
+      });
+    }
   }
 
   return lineItems;
@@ -288,9 +321,24 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
     );
     await deductInventoryForOrder(conn, payment.related_id);
   } else if (payment.payment_type === 'reservation') {
-    await conn.query(
-      "UPDATE reservations SET payment_status = 'paid', status = 'confirmed', paid_at = NOW() WHERE id = ?",
+    const [[resRow]] = await conn.query(
+      `SELECT COALESCE(t.price, 0) + COALESCE((
+         SELECT SUM(ri.quantity * ri.unit_price) FROM reservation_items ri WHERE ri.reservation_id = r.id
+       ), 0) AS total_amount,
+       r.deposit_amount
+       FROM reservations r
+       LEFT JOIN bar_tables t ON t.id = r.table_id
+       WHERE r.id = ? LIMIT 1`,
       [payment.related_id]
+    );
+    const totalAmount = Number(resRow?.total_amount || 0);
+    const paidAmount = Number(payment.amount || 0);
+    // If no computed total, fall back to deposit_amount to avoid marking full paid on deposits.
+    const targetTotal = totalAmount > 0 ? totalAmount : Number(resRow?.deposit_amount || 0);
+    const newPaymentStatus = targetTotal > 0 && paidAmount >= targetTotal ? 'paid' : 'partial';
+    await conn.query(
+      "UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?",
+      [newPaymentStatus, payment.related_id]
     );
     await deductInventoryForReservation(conn, payment.related_id);
   }

@@ -246,9 +246,27 @@ async function handleOrderPaymentPaid(payment) {
  * Process paid reservation
  */
 async function handleReservationPaymentPaid(payment) {
-  await pool.query(
-    "UPDATE reservations SET payment_status = 'paid', status = 'confirmed', paid_at = NOW() WHERE id = ?",
+  const [[resRow]] = await pool.query(
+    `SELECT COALESCE(t.price, 0) + COALESCE((
+       SELECT SUM(ri.quantity * ri.unit_price) FROM reservation_items ri WHERE ri.reservation_id = r.id
+     ), 0) AS total_amount,
+      r.deposit_amount
+     FROM reservations r
+     LEFT JOIN bar_tables t ON t.id = r.table_id
+     WHERE r.id = ? LIMIT 1`,
     [payment.related_id]
+  );
+
+  const totalAmount = Number(resRow?.total_amount || 0);
+  const paidAmount = Number(payment.amount || 0);
+
+  // If we don't have a computed total, fall back to deposit_amount to avoid marking as fully paid on deposits.
+  const targetTotal = totalAmount > 0 ? totalAmount : Number(resRow?.deposit_amount || 0);
+  const newPaymentStatus = targetTotal > 0 && paidAmount >= targetTotal ? 'paid' : 'partial';
+
+  await pool.query(
+    "UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?",
+    [newPaymentStatus, payment.related_id]
   );
 
   // Create payout record
