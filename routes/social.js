@@ -894,7 +894,13 @@ router.get("/notifications", requireAuth, async (req, res) => {
     );
 
     const [rows] = await pool.query(
-      "SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
+      `SELECT n.*, r.status AS reservation_status, r.payment_status AS reservation_payment_status
+       FROM notifications n
+       LEFT JOIN reservations r
+         ON n.reference_type = 'reservation' AND n.reference_id = r.id
+       WHERE n.user_id = ?
+       ORDER BY n.created_at DESC
+       LIMIT ?`,
       [userId, limit]
     );
 
@@ -903,6 +909,8 @@ router.get("/notifications", requireAuth, async (req, res) => {
       type: row.type,
       title: row.title,
       message: row.message,
+      reference_id: row.reference_id,
+      reference_type: row.reference_type,
       related_id: row.related_id,
       related_type: row.related_type,
       is_read: !!row.is_read,
@@ -910,7 +918,9 @@ router.get("/notifications", requireAuth, async (req, res) => {
       time_ago: timeElapsed(row.created_at),
       post_id: row.post_id || null,
       comment_id: row.comment_id || null,
-      bar_id: row.bar_id || null
+      bar_id: row.bar_id || null,
+      reservation_status: row.reservation_status || null,
+      reservation_payment_status: row.reservation_payment_status || null
     }));
 
     return res.json({ success: true, unread_count: unreadCount, notifications });

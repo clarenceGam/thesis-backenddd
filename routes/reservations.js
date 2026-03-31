@@ -889,6 +889,32 @@ router.get(
                 r.status, r.payment_status, r.notes, r.deposit_amount,
                 r.paid_at, r.checked_in_at, r.no_show_at, r.created_at,
                 pt.reference_id, pt.payment_method, pt.amount AS payment_amount,
+                (
+                  COALESCE((
+                    SELECT SUM(bt2.price)
+                    FROM reservation_tables rt2
+                    JOIN bar_tables bt2 ON bt2.id = rt2.table_id
+                    WHERE rt2.reservation_id = r.id
+                  ), t.price, 0) +
+                  COALESCE((
+                    SELECT SUM(ri.quantity * ri.unit_price)
+                    FROM reservation_items ri
+                    WHERE ri.reservation_id = r.id
+                  ), 0)
+                ) AS total_amount,
+                GREATEST(0, (
+                  COALESCE((
+                    SELECT SUM(bt2.price)
+                    FROM reservation_tables rt2
+                    JOIN bar_tables bt2 ON bt2.id = rt2.table_id
+                    WHERE rt2.reservation_id = r.id
+                  ), t.price, 0) +
+                  COALESCE((
+                    SELECT SUM(ri.quantity * ri.unit_price)
+                    FROM reservation_items ri
+                    WHERE ri.reservation_id = r.id
+                  ), 0)
+                ) - COALESCE(pt.amount, 0)) AS remaining_balance,
                 rr.id AS review_id, rr.rating AS review_rating, rr.comment AS review_comment,
                 CASE WHEN rr.id IS NULL THEN 0 ELSE 1 END AS has_review
          FROM reservations r

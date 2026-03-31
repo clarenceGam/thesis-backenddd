@@ -440,6 +440,39 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
       "UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?",
       [newPaymentStatus, payment.related_id]
     );
+
+    const [[reservationNotifRow]] = await conn.query(
+      `SELECT r.customer_user_id, r.reservation_date, r.reservation_time, b.name AS bar_name
+       FROM reservations r
+       JOIN bars b ON b.id = r.bar_id
+       WHERE r.id = ?
+       LIMIT 1`,
+      [payment.related_id]
+    );
+
+    if (reservationNotifRow?.customer_user_id) {
+      const formattedDate = new Date(reservationNotifRow.reservation_date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+      const formattedTime = String(reservationNotifRow.reservation_time || '').slice(0, 5);
+      const notifMessage = newPaymentStatus === 'partial'
+        ? `Your reservation at ${reservationNotifRow.bar_name} for ${formattedDate} at ${formattedTime} is confirmed. Payment status: Partially Paid.`
+        : `Your reservation at ${reservationNotifRow.bar_name} for ${formattedDate} at ${formattedTime} is confirmed. Payment status: Paid.`;
+
+      const [notifUpdate] = await conn.query(
+        `UPDATE notifications
+         SET title = 'Reservation Confirmed', message = ?, is_read = 0
+         WHERE user_id = ? AND reference_type = 'reservation' AND reference_id = ? AND type = 'reservation_confirmed'`,
+        [notifMessage, reservationNotifRow.customer_user_id, payment.related_id]
+      );
+
+      if (!notifUpdate.affectedRows) {
+        await conn.query(
+          `INSERT INTO notifications (user_id, type, title, message, reference_id, reference_type, is_read, created_at)
+           VALUES (?, 'reservation_confirmed', 'Reservation Confirmed', ?, ?, 'reservation', 0, NOW())`,
+          [reservationNotifRow.customer_user_id, notifMessage, payment.related_id]
+        );
+      }
+    }
+
     await deductInventoryForReservation(conn, payment.related_id);
   }
 
