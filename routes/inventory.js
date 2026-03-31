@@ -41,6 +41,18 @@ router.post("/owner/inventory", requireAuth, requirePermission("menu_create"), a
     const { name, unit, stock_qty, reorder_level, cost_price } = req.body || {};
     if (!name) return res.status(400).json({ success:false, message:"name required" });
 
+    // Non-owners must have an approved request matching the item name
+    const userRole = String(req.user.role || req.user.role_name || '').toLowerCase();
+    if (userRole !== 'bar_owner') {
+      const [approved] = await pool.query(
+        `SELECT id FROM inventory_requests WHERE requester_id = ? AND bar_id = ? AND status = 'approved' AND LOWER(item_name) = LOWER(?) LIMIT 1`,
+        [req.user.id, barId, String(name).trim()]
+      );
+      if (!approved.length) {
+        return res.status(403).json({ success: false, message: "You need an approved inventory request for this item before creating it." });
+      }
+    }
+
     const newStock = stock_qty !== undefined ? Number(stock_qty) : 0;
     const newReorder = reorder_level !== undefined ? Number(reorder_level) : 0;
     let status = "normal";
@@ -92,12 +104,25 @@ router.patch("/owner/inventory/:id",
 
       // Get current item first (to compute correct stock_status)
       const [existingRows] = await pool.query(
-        "SELECT stock_qty, reorder_level FROM inventory_items WHERE id=? AND bar_id=? LIMIT 1",
+        "SELECT name, stock_qty, reorder_level FROM inventory_items WHERE id=? AND bar_id=? LIMIT 1",
         [id, barId]
       );
 
       if (!existingRows.length) {
         return res.status(404).json({ success:false, message:"Item not found" });
+      }
+
+      // Non-owners must have an approved request matching the item name
+      const userRole = String(req.user.role || req.user.role_name || '').toLowerCase();
+      if (userRole !== 'bar_owner') {
+        const itemName = name || existingRows[0].name;
+        const [approved] = await pool.query(
+          `SELECT id FROM inventory_requests WHERE requester_id = ? AND bar_id = ? AND status = 'approved' AND LOWER(item_name) = LOWER(?) LIMIT 1`,
+          [req.user.id, barId, String(itemName).trim()]
+        );
+        if (!approved.length) {
+          return res.status(403).json({ success: false, message: "You need an approved inventory request for this item before updating it." });
+        }
       }
 
       const current = existingRows[0];
@@ -683,15 +708,15 @@ router.post(
       const userId = req.user.id;
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
-      const { item_name, quantity_needed, unit, reason } = req.body || {};
+      const { item_name, quantity_needed, unit, reason, cost_price, reorder_level } = req.body || {};
       if (!item_name || !quantity_needed) {
         return res.status(400).json({ success: false, message: "item_name and quantity_needed are required" });
       }
 
       const [result] = await pool.query(
-        `INSERT INTO inventory_requests (bar_id, requester_id, item_name, quantity_needed, unit, reason, status)
-         VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
-        [barId, userId, item_name, Number(quantity_needed), unit || 'Piece', reason || null]
+        `INSERT INTO inventory_requests (bar_id, requester_id, item_name, quantity_needed, unit, reason, cost_price, reorder_level, status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+        [barId, userId, item_name, Number(quantity_needed), unit || 'Piece', reason || null, cost_price ? Number(cost_price) : null, reorder_level ? Number(reorder_level) : null]
       );
 
       logAudit(null, {
@@ -799,11 +824,30 @@ router.post(
 
       // Verify request belongs to this bar and is pending
       const [existing] = await pool.query(
-        "SELECT id, item_name, quantity_needed, unit FROM inventory_requests WHERE id = ? AND bar_id = ? AND status = 'pending' LIMIT 1",
+        "SELECT id, item_name, quantity_needed, unit, cost_price, reorder_level FROM inventory_requests WHERE id = ? AND bar_id = ? AND status = 'pending' LIMIT 1",
         [requestId, barId]
       );
       if (!existing.length) {
         return res.status(404).json({ success: false, message: "Request not found or already processed" });
+      }
+
+      const req = existing[0];
+
+      // Auto-create inventory item from approved request
+      try {
+        await pool.query(
+          `INSERT INTO inventory_items (bar_id, name, unit, stock_qty, reorder_level, cost_price, status)
+           VALUES (?, ?, ?, ?, ?, ?, 'normal')
+           ON DUPLICATE KEY UPDATE
+           stock_qty = VALUES(stock_qty),
+           reorder_level = VALUES(reorder_level),
+           cost_price = VALUES(cost_price),
+           status = VALUES(status)`,
+          [barId, req.item_name, req.unit || 'Piece', req.quantity_needed || 0, req.reorder_level || 0, req.cost_price || 0]
+        );
+      } catch (insertErr) {
+        console.error("AUTO CREATE INVENTORY ITEM ERROR:", insertErr);
+        // Continue with approval even if insert fails
       }
 
       // Update request status
