@@ -131,6 +131,61 @@ async function hasReservationTimeLimitColumns() {
   return _hasReservationTimeLimitColumnsCache;
 }
 
+let _hasUserStaffTypeColumnCache = null;
+async function hasUserStaffTypeColumn() {
+  if (_hasUserStaffTypeColumnCache !== null) return _hasUserStaffTypeColumnCache;
+  try {
+    const [rows] = await pool.query(
+      `SELECT 1
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'users'
+         AND COLUMN_NAME = 'staff_type'
+       LIMIT 1`
+    );
+    _hasUserStaffTypeColumnCache = rows.length > 0;
+  } catch (_) {
+    _hasUserStaffTypeColumnCache = false;
+  }
+  return _hasUserStaffTypeColumnCache;
+}
+
+function normalizeStringArray(values) {
+  if (!Array.isArray(values)) return [];
+  return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function parseJsonArray(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return normalizeStringArray(value);
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return normalizeStringArray(parsed);
+  } catch (_) {
+    return [];
+  }
+}
+
+async function getBarStaffTypes(barId) {
+  const [[barRow]] = await pool.query(
+    `SELECT staff_types
+     FROM bars
+     WHERE id = ?
+     LIMIT 1`,
+    [barId]
+  );
+  return parseJsonArray(barRow?.staff_types);
+}
+
+function normalizeStaffTypeValue(staffType, allowedStaffTypes) {
+  const normalized = String(staffType || "").trim();
+  if (!normalized) return null;
+  const matched = (allowedStaffTypes || []).find(
+    (type) => String(type || "").trim().toLowerCase() === normalized.toLowerCase()
+  );
+  return matched || null;
+}
+
 // â”€â”€â”€ Multer storage for bar profile images â”€â”€â”€
 const barImageStorage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -322,7 +377,7 @@ router.post(
   requirePermission("staff_create"),
   async (req, res) => {
     try {
-      const { first_name, last_name, email, password, phone_number, role } = req.body;
+      const { first_name, last_name, email, password, phone_number, role, staff_type } = req.body;
 
       // Validate roles using constants
       if (!OWNER_ALLOWED_CREATE.includes(role)) {
@@ -343,6 +398,13 @@ router.post(
         return res.status(400).json({ success: false, message: "No bar_id on account" });
       }
 
+      const hasStaffTypeCol = await hasUserStaffTypeColumn();
+      const allowedStaffTypes = hasStaffTypeCol ? await getBarStaffTypes(barId) : [];
+      const normalizedStaffType = hasStaffTypeCol ? normalizeStaffTypeValue(staff_type, allowedStaffTypes) : null;
+      if (hasStaffTypeCol && String(staff_type || "").trim() && !normalizedStaffType) {
+        return res.status(400).json({ success: false, message: "Invalid staff type selected for this bar" });
+      }
+
       // unique email
       const [existing] = await pool.query("SELECT id FROM users WHERE email = ? LIMIT 1", [email]);
       if (existing.length) {
@@ -359,11 +421,22 @@ router.post(
       );
       const roleId = roleRows.length ? roleRows[0].id : null;
 
+      const insertColumns = ["first_name", "last_name", "email", "password", "phone_number", "role"];
+      const insertValues = [first_name, last_name, email, hashed, phone_number || null, role];
+
+      if (hasStaffTypeCol) {
+        insertColumns.push("staff_type");
+        insertValues.push(normalizedStaffType);
+      }
+
+      insertColumns.push("role_id", "is_active", "bar_id");
+      insertValues.push(roleId, 1, barId);
+
       const [result] = await pool.query(
         `INSERT INTO users
-          (first_name, last_name, email, password, phone_number, role, role_id, is_active, bar_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, NOW(), NOW())`,
-        [first_name, last_name, email, hashed, phone_number || null, role, roleId, barId]
+          (${insertColumns.join(", ")}, created_at, updated_at)
+         VALUES (${insertColumns.map(() => "?").join(", ")}, NOW(), NOW())`,
+        insertValues
       );
 
       // Seed user_permissions from role_permissions so new staff accounts are never blank.
@@ -453,7 +526,7 @@ router.patch(
   requirePermission("staff_update"),
   async (req, res) => {
     try {
-      const { first_name, last_name, email, phone_number, role, is_active } = req.body;
+      const { first_name, last_name, email, phone_number, role, is_active, staff_type } = req.body;
       const userId = Number(req.params.id);
       let nextRoleId = null;
       
@@ -465,6 +538,9 @@ router.patch(
       if (!barId) {
         return res.status(400).json({ success: false, message: "No bar_id on account" });
       }
+
+      const hasStaffTypeCol = await hasUserStaffTypeColumn();
+      const allowedStaffTypes = hasStaffTypeCol ? await getBarStaffTypes(barId) : [];
 
       // Check if user exists and belongs to same bar
       const [userRows] = await pool.query(
@@ -495,6 +571,16 @@ router.patch(
       if (phone_number !== undefined) {
         updates.push("phone_number = ?");
         params.push(phone_number);
+      }
+      if (hasStaffTypeCol && staff_type !== undefined) {
+        const normalizedStaffType = String(staff_type || "").trim()
+          ? normalizeStaffTypeValue(staff_type, allowedStaffTypes)
+          : null;
+        if (String(staff_type || "").trim() && !normalizedStaffType) {
+          return res.status(400).json({ success: false, message: "Invalid staff type selected for this bar" });
+        }
+        updates.push("staff_type = ?");
+        params.push(normalizedStaffType);
       }
       if (role !== undefined) {
         if (!OWNER_ALLOWED_CREATE.includes(role)) {
@@ -666,7 +752,7 @@ router.get(
                 friday_hours, saturday_hours, sunday_hours,
                 accept_cash_payment, accept_online_payment, accept_gcash,
                 gcash_number, gcash_account_name,
-                minimum_reservation_deposit${reservationModeSelect}${timeLimitSelect},
+                minimum_reservation_deposit, staff_types${reservationModeSelect}${timeLimitSelect},
                 status, rating, review_count, created_at, updated_at
          FROM bars
          WHERE id = ? LIMIT 1`,
@@ -711,7 +797,7 @@ router.patch(
         "accept_cash_payment", "accept_online_payment", "accept_gcash",
         "minimum_reservation_deposit",
         "gcash_number", "gcash_account_name",
-        "staff_types"
+        "staff_types", "bar_types"
       ];
       if (includeReservationMode) allowed.push("reservation_mode");
       if (includeTimeLimits) allowed.push("reservation_time_limit_mode", "reservation_time_limit_minutes");
@@ -729,9 +815,8 @@ router.patch(
       for (const key of allowed) {
         if (req.body[key] !== undefined) {
           updates.push(`${key} = ?`);
-          // Handle staff_types as JSON
-          if (key === "staff_types") {
-            params.push(Array.isArray(req.body[key]) ? JSON.stringify(req.body[key]) : req.body[key]);
+          if (key === "staff_types" || key === "bar_types") {
+            params.push(JSON.stringify(parseJsonArray(req.body[key])));
           } else {
             params.push(req.body[key]);
           }
@@ -768,6 +853,9 @@ router.patch(
       const reservationModeSelect = includeReservationMode
         ? ", reservation_mode"
         : ", 'manual_approval' AS reservation_mode";
+      const updatedTimeLimitSelect = includeTimeLimits
+        ? ", reservation_time_limit_mode, reservation_time_limit_minutes"
+        : ", NULL AS reservation_time_limit_mode, NULL AS reservation_time_limit_minutes";
       const [updated] = await pool.query(
         `SELECT id, name, description, address, city, state, zip_code,
                 phone, contact_number, email, website, category, price_range,
@@ -778,7 +866,8 @@ router.patch(
                 monday_hours, tuesday_hours, wednesday_hours, thursday_hours,
                 friday_hours, saturday_hours, sunday_hours,
                 accept_cash_payment, accept_online_payment, accept_gcash,
-                minimum_reservation_deposit${reservationModeSelect},
+                gcash_number, gcash_account_name,
+                minimum_reservation_deposit, staff_types, bar_types${reservationModeSelect}${updatedTimeLimitSelect},
                 status, updated_at
          FROM bars WHERE id = ? LIMIT 1`,
         [barId]
@@ -1266,6 +1355,26 @@ router.post(
 
 // ─── OWNER: List bar staff ───
 router.get(
+  "/bar/users/meta",
+  requireAuth,
+  requirePermission("staff_view"),
+  async (req, res) => {
+    try {
+      const barId = req.user.bar_id;
+      if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
+
+      const staffTypes = await getBarStaffTypes(barId);
+      const supportsStaffType = await hasUserStaffTypeColumn();
+
+      return res.json({ success: true, data: { staff_types: staffTypes, supports_staff_type: supportsStaffType } });
+    } catch (err) {
+      console.error("BAR USERS META ERROR:", err);
+      return res.status(500).json({ success: false, message: "Server error" });
+    }
+  }
+);
+
+router.get(
   "/bar/users",
   requireAuth,
   requirePermission("staff_view"),
@@ -1274,9 +1383,13 @@ router.get(
       const barId = req.user.bar_id;
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
+      const staffTypeSelect = await hasUserStaffTypeColumn()
+        ? ", u.staff_type"
+        : ", NULL AS staff_type";
+
       const [rows] = await pool.query(
         `SELECT u.id, u.first_name, u.last_name, u.email, u.phone_number, u.role, u.role_id,
-                u.is_active, u.profile_picture, u.created_at, u.updated_at,
+                u.is_active, u.profile_picture, u.created_at, u.updated_at${staffTypeSelect},
                 r.name AS role_name
          FROM users u
          LEFT JOIN roles r ON r.id = u.role_id
@@ -1339,9 +1452,13 @@ router.get(
       const barId = req.user.bar_id;
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
+      const staffTypeSelect = await hasUserStaffTypeColumn()
+        ? ", u.staff_type"
+        : ", NULL AS staff_type";
+
       const [rows] = await pool.query(
         `SELECT u.id, u.first_name, u.last_name, u.email, u.phone_number, u.role,
-                u.is_active, u.profile_picture, u.created_at, u.updated_at
+                u.is_active, u.profile_picture, u.created_at, u.updated_at${staffTypeSelect}
          FROM users u
          WHERE u.bar_id = ? AND u.is_active = 0 AND u.role != 'customer'
          ORDER BY u.updated_at DESC`,
