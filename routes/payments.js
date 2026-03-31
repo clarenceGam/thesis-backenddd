@@ -7,6 +7,9 @@ const { logAudit, auditContext } = require("../utils/audit");
 
 let _hasPaymentLineItemsTable = null;
 let _hasReservationPaymentTransactionId = null;
+let _reservationPaymentStatusColumnType = null;
+let _reservationPaymentMethodColumnType = null;
+let _paymentLineItemTypeColumnType = null;
 
 async function hasPaymentLineItemsTable(conn) {
   if (_hasPaymentLineItemsTable !== null) return _hasPaymentLineItemsTable;
@@ -33,6 +36,80 @@ async function hasReservationPaymentTransactionIdColumn(conn) {
   );
   _hasReservationPaymentTransactionId = rows.length > 0;
   return _hasReservationPaymentTransactionId;
+}
+
+async function getColumnType(conn, tableName, columnName) {
+  const [rows] = await conn.query(
+    `SELECT COLUMN_TYPE
+     FROM INFORMATION_SCHEMA.COLUMNS
+     WHERE TABLE_SCHEMA = DATABASE()
+       AND TABLE_NAME = ?
+       AND COLUMN_NAME = ?
+     LIMIT 1`,
+    [tableName, columnName]
+  );
+  return rows[0]?.COLUMN_TYPE || null;
+}
+
+async function getReservationPaymentStatusColumnType(conn) {
+  if (_reservationPaymentStatusColumnType !== null) return _reservationPaymentStatusColumnType;
+  _reservationPaymentStatusColumnType = await getColumnType(conn, 'reservations', 'payment_status');
+  return _reservationPaymentStatusColumnType;
+}
+
+async function getReservationPaymentMethodColumnType(conn) {
+  if (_reservationPaymentMethodColumnType !== null) return _reservationPaymentMethodColumnType;
+  _reservationPaymentMethodColumnType = await getColumnType(conn, 'reservations', 'payment_method');
+  return _reservationPaymentMethodColumnType;
+}
+
+async function getPaymentLineItemTypeColumnType(conn) {
+  if (_paymentLineItemTypeColumnType !== null) return _paymentLineItemTypeColumnType;
+  _paymentLineItemTypeColumnType = await getColumnType(conn, 'payment_line_items', 'item_type');
+  return _paymentLineItemTypeColumnType;
+}
+
+function enumTypeHasValue(columnType, value) {
+  const normalizedType = String(columnType || '').toLowerCase();
+  const normalizedValue = String(value || '').toLowerCase();
+  if (!normalizedType || !normalizedValue) return false;
+  return normalizedType.includes(`'${normalizedValue}'`);
+}
+
+async function normalizeReservationPaymentStatusForStorage(conn, paymentStatus) {
+  const normalized = String(paymentStatus || '').toLowerCase().trim();
+  if (!normalized) return null;
+
+  const columnType = await getReservationPaymentStatusColumnType(conn);
+  if (!columnType) return normalized;
+  if (enumTypeHasValue(columnType, normalized)) return normalized;
+  if (normalized === 'partial' && enumTypeHasValue(columnType, 'paid')) return 'paid';
+  if (normalized === 'cancelled' && enumTypeHasValue(columnType, 'failed')) return 'failed';
+  if (enumTypeHasValue(columnType, 'pending')) return 'pending';
+  return null;
+}
+
+async function normalizeReservationPaymentMethodForStorage(conn, paymentMethod) {
+  const normalized = String(paymentMethod || '').toLowerCase().trim();
+  if (!normalized) return null;
+
+  const columnType = await getReservationPaymentMethodColumnType(conn);
+  if (!columnType) return normalized;
+  if (enumTypeHasValue(columnType, normalized)) return normalized;
+  if (enumTypeHasValue(columnType, 'other')) return 'other';
+  if (enumTypeHasValue(columnType, 'gcash')) return 'gcash';
+  if (enumTypeHasValue(columnType, 'cash')) return 'cash';
+  return null;
+}
+
+async function normalizePaymentLineItemTypeForStorage(conn, itemType) {
+  const normalized = String(itemType || '').toLowerCase().trim() || 'other';
+
+  const columnType = await getPaymentLineItemTypeColumnType(conn);
+  if (!columnType) return normalized;
+  if (enumTypeHasValue(columnType, normalized)) return normalized;
+  if (enumTypeHasValue(columnType, 'other')) return 'other';
+  return normalized;
 }
 
 function parseReservationOrderItems(notes) {
@@ -192,18 +269,23 @@ async function upsertPaymentLineItems(conn, paymentId, lineItems) {
   if (!(await hasPaymentLineItemsTable(conn))) return;
   await conn.query("DELETE FROM payment_line_items WHERE payment_transaction_id = ?", [paymentId]);
   for (const item of lineItems) {
+    const storedItemType = await normalizePaymentLineItemTypeForStorage(conn, item.item_type);
+    const metadata = item.metadata ? { ...item.metadata } : {};
+    if (storedItemType !== item.item_type && item.item_type) {
+      metadata.line_kind = item.item_type;
+    }
     await conn.query(
       `INSERT INTO payment_line_items
        (payment_transaction_id, item_type, item_name, quantity, unit_price, line_total, metadata)
        VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         paymentId,
-        item.item_type,
+        storedItemType,
         item.item_name,
         Number(item.quantity || 1),
         Number(item.unit_price || 0),
         Number(item.line_total || 0),
-        item.metadata ? JSON.stringify(item.metadata) : null,
+        Object.keys(metadata).length ? JSON.stringify(metadata) : null,
       ]
     );
   }
@@ -412,8 +494,11 @@ async function buildReservationLineItems(conn, reservation) {
 
 function normalizePaymentRow(payment, lineItemsByPaymentId) {
   const items = lineItemsByPaymentId.get(payment.id) || [];
-  const tableItem = items.find((i) => i.item_type === "table") || null;
-  const menuItems = items.filter((i) => i.item_type === "menu");
+  const tableItem = items.find((i) => String((safeParseJson(i.metadata) || {}).line_kind || i.item_type || '').toLowerCase() === "table") || null;
+  const menuItems = items.filter((i) => {
+    const lineKind = String((safeParseJson(i.metadata) || {}).line_kind || i.item_type || '').toLowerCase();
+    return lineKind === "menu" || lineKind === "package";
+  });
 
   const totalFromLineItems = items.reduce((sum, i) => sum + Number(i.line_total || 0), 0);
   const paidAmount = Number(payment.amount || 0);
@@ -510,10 +595,10 @@ async function deductInventoryForReservation(conn, reservationId, paymentId = nu
       if (paymentItems.length) {
         usedPaymentLineItems = true;
         for (const item of paymentItems) {
-          const itemType = String(item.item_type || '').toLowerCase();
+          const metadata = safeParseJson(item.metadata) || {};
+          const itemType = String(metadata.line_kind || item.item_type || '').toLowerCase();
           const itemName = String(item.item_name || '').trim();
           const qty = Number(item.quantity || 0);
-          const metadata = safeParseJson(item.metadata) || {};
           if (!qty) continue;
 
           if (itemType === 'menu') {
@@ -753,9 +838,11 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
       console.error('MARK_PAYMENT_CALC_ERR:', calcErr.message);
     }
 
+    const storedPaymentStatus = await normalizeReservationPaymentStatusForStorage(conn, newPaymentStatus);
+
     await conn.query(
       "UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?",
-      [newPaymentStatus, payment.related_id]
+      [storedPaymentStatus, payment.related_id]
     );
 
     const [[reservationNotifRow]] = await conn.query(
@@ -981,20 +1068,21 @@ router.post("/create", requireAuth, async (req, res) => {
         [paymentId, relatedId]
       );
     } else if (payment_type === 'reservation') {
+      const storedPaymentMethod = await normalizeReservationPaymentMethodForStorage(conn, payment_method);
       const hasPaymentTxCol = await hasReservationPaymentTransactionIdColumn(conn);
       if (hasPaymentTxCol) {
         await conn.query(
           `UPDATE reservations
            SET payment_status = 'pending', payment_method = ?, deposit_amount = ?, payment_reference = ?, payment_transaction_id = ?
            WHERE id = ?`,
-          [payment_method, amountNum, referenceId, paymentId, relatedId]
+          [storedPaymentMethod, amountNum, referenceId, paymentId, relatedId]
         );
       } else {
         await conn.query(
           `UPDATE reservations
            SET payment_status = 'pending', payment_method = ?, deposit_amount = ?, payment_reference = ?
            WHERE id = ?`,
-          [payment_method, amountNum, referenceId, relatedId]
+          [storedPaymentMethod, amountNum, referenceId, relatedId]
         );
       }
     }
@@ -1187,9 +1275,10 @@ router.post("/cancel/:reference_id", requireAuth, async (req, res) => {
     if (payment.payment_type === 'order') {
       await conn.query("UPDATE pos_orders SET payment_status = 'cancelled' WHERE id = ?", [payment.related_id]);
     } else if (payment.payment_type === 'reservation') {
+      const storedCancelledStatus = await normalizeReservationPaymentStatusForStorage(conn, 'cancelled');
       await conn.query(
-        "UPDATE reservations SET payment_status = 'cancelled', status = 'cancelled' WHERE id = ? AND status IN ('pending','approved')",
-        [payment.related_id]
+        "UPDATE reservations SET payment_status = ?, status = 'cancelled' WHERE id = ? AND status IN ('pending','approved')",
+        [storedCancelledStatus, payment.related_id]
       );
     }
 
@@ -1376,3 +1465,4 @@ router.get("/:reference_id", requireAuth, async (req, res) => {
 
 module.exports = router;
 module.exports.deductInventoryForReservation = deductInventoryForReservation;
+module.exports.normalizeReservationPaymentStatusForStorage = normalizeReservationPaymentStatusForStorage;

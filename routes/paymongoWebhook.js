@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../config/database");
 const paymongoService = require("../services/paymongoService");
-const { deductInventoryForReservation } = require("./payments");
+const { deductInventoryForReservation, normalizeReservationPaymentStatusForStorage } = require("./payments");
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PAYMONGO WEBHOOK HANDLER
@@ -313,9 +313,11 @@ async function handleReservationPaymentPaid(payment) {
     console.error('HANDLE_RESERVATION_PAYMENT_PAID_ERR:', err.message);
   }
 
+  const storedPaymentStatus = await normalizeReservationPaymentStatusForStorage(pool, newPaymentStatus);
+
   await pool.query(
     "UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?",
-    [newPaymentStatus, payment.related_id]
+    [storedPaymentStatus, payment.related_id]
   );
 
   if (shouldDeductInventory) {

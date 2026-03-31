@@ -2,7 +2,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../config/database");
 const paymongoService = require("../services/paymongoService");
-const { deductInventoryForReservation } = require("./payments");
+const { deductInventoryForReservation, normalizeReservationPaymentStatusForStorage } = require("./payments");
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MANUAL PAYMENT CHECK (FOR DEVELOPMENT/TESTING)
@@ -300,7 +300,8 @@ async function updateReservation(payment) {
   } catch (err) {
     console.error('PAYMENT_CHECK_UPDATE_RESERVATION_ERR:', err.message);
   }
-  await pool.query("UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?", [newPaymentStatus, payment.related_id]);
+  const storedPaymentStatus = await normalizeReservationPaymentStatusForStorage(pool, newPaymentStatus);
+  await pool.query("UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?", [storedPaymentStatus, payment.related_id]);
   if (shouldDeductInventory) {
     await deductInventoryForReservation(pool, payment.related_id, payment.id);
   }
