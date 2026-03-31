@@ -2215,7 +2215,18 @@ function isEventWithinOperatingHours(eventDate, startTime, endTime, operatingHou
     const barOpenMin = toMinutes(barOpen);
     const barCloseMin = toMinutes(barClose);
     
-    if (eventStart < barOpenMin || eventEnd > barCloseMin) {
+    let normalizedEventStart = eventStart;
+    let normalizedEventEnd = eventEnd;
+    let normalizedBarClose = barCloseMin;
+
+    // Handle overnight operating hours (e.g. 1PM to 12:30AM)
+    if (barCloseMin < barOpenMin) {
+      normalizedBarClose += 24 * 60;
+      if (normalizedEventStart < barOpenMin) normalizedEventStart += 24 * 60;
+      if (normalizedEventEnd < barOpenMin) normalizedEventEnd += 24 * 60;
+    }
+
+    if (normalizedEventStart < barOpenMin || normalizedEventEnd > normalizedBarClose) {
       return { 
         valid: false, 
         message: `Event time (${startTime} - ${endTime}) is outside bar operating hours (${barOpen} - ${barClose}) on ${eventDay}`
