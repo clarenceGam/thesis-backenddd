@@ -9,6 +9,21 @@ const { USER_ROLES } = require("../config/constants");
 const { logAudit, auditContext } = require("../utils/audit");
 const jwt = require("jsonwebtoken");
 
+function parseReservationOrderItems(notes) {
+  if (!notes) return [];
+  const m = String(notes).match(/Order:\s*(.+)/i);
+  if (!m) return [];
+  return m[1]
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const qtyMatch = entry.match(/(.+?)\s*x\s*(\d+)$/i);
+      if (!qtyMatch) return { name: entry, quantity: 1 };
+      return { name: qtyMatch[1].trim(), quantity: Number(qtyMatch[2]) || 1 };
+    });
+}
+
 function generateTransactionNumber() {
   const now = new Date();
   const date = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}`;
@@ -1134,6 +1149,26 @@ router.get(
         items = itemRows;
       }
 
+      // If no items from reservation_items, fall back to notes parsing
+      if (items.length === 0 && reservation.notes) {
+        const parsedItems = parseReservationOrderItems(reservation.notes);
+        for (const it of parsedItems) {
+          const [[menuRow]] = await pool.query(
+            `SELECT selling_price FROM menu_items WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?) ORDER BY id DESC LIMIT 1`,
+            [reservation.bar_id, it.name]
+          );
+          const unitPrice = Number(menuRow?.selling_price || 0);
+          if (unitPrice > 0) {
+            items.push({
+              menu_name: it.name,
+              quantity: Number(it.quantity),
+              unit_price: unitPrice,
+              line_total: unitPrice * Number(it.quantity),
+            });
+          }
+        }
+      }
+
       // Fetch payment transaction info
       const [paymentRows] = await pool.query(
         `SELECT pt.id AS payment_id, pt.reference_id, pt.amount, pt.status AS payment_status,
@@ -1147,9 +1182,19 @@ router.get(
 
       const computedTotal = items.reduce((sum, it) => sum + Number(it.line_total || 0), 0)
         + Number(reservation.table_price || 0);
-      // Use max of computed total vs deposit/payment to avoid showing Fully Paid when items are in notes
-      const paidAmount = payment?.status === 'paid' ? Number(payment.amount || 0) : Number(reservation.deposit_amount || 0);
-      const totalAmount = Math.max(computedTotal, paidAmount);
+
+      // Also check payment_line_items for the total (captures full order at checkout time)
+      let pliTotal = 0;
+      if (payment?.payment_id) {
+        const [[pliRow]] = await pool.query(
+          `SELECT COALESCE(SUM(line_total), 0) AS pli_total FROM payment_line_items WHERE payment_transaction_id = ?`,
+          [payment.payment_id]
+        );
+        pliTotal = Number(pliRow?.pli_total || 0);
+      }
+
+      // Use the best total we have; never fall back to paidAmount (that causes false "Fully Paid")
+      const totalAmount = Math.max(computedTotal, pliTotal) || Number(reservation.deposit_amount || 0);
 
       return res.json({
         success: true,

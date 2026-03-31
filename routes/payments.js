@@ -141,6 +141,28 @@ async function buildReservationLineItems(conn, reservation) {
         },
       });
     }
+
+    // If reservation_items table exists but has no rows, fall back to notes parsing
+    if (reservationItems.length === 0 && reservation.notes) {
+      const parsedItems = parseReservationOrderItems(reservation.notes);
+      for (const it of parsedItems) {
+        const [menuRows] = await conn.query(
+          `SELECT selling_price FROM menu_items WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?) ORDER BY id DESC LIMIT 1`,
+          [reservation.bar_id, it.name]
+        );
+        const unitPrice = Number(menuRows[0]?.selling_price || 0);
+        if (unitPrice > 0) {
+          lineItems.push({
+            item_type: "menu",
+            item_name: it.name,
+            quantity: Number(it.quantity || 1),
+            unit_price: unitPrice,
+            line_total: unitPrice * Number(it.quantity || 1),
+            metadata: { reservation_id: reservation.id },
+          });
+        }
+      }
+    }
   } else {
     // Fallback: parse from notes if reservation_items table doesn't exist
     const parsedItems = parseReservationOrderItems(reservation.notes);
@@ -337,7 +359,26 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
        WHERE ri.reservation_id = ?`,
       [payment.related_id]
     );
-    const itemsTotal = Number(itemSumRow?.items_total || 0);
+    let itemsTotal = Number(itemSumRow?.items_total || 0);
+
+    // If reservation_items is empty, fall back to notes parsing for correct total
+    if (itemsTotal === 0) {
+      const [[resNotes]] = await conn.query(
+        `SELECT notes, bar_id FROM reservations WHERE id = ? LIMIT 1`,
+        [payment.related_id]
+      );
+      if (resNotes?.notes) {
+        const parsedItems = parseReservationOrderItems(resNotes.notes);
+        for (const it of parsedItems) {
+          const [menuRows] = await conn.query(
+            `SELECT selling_price FROM menu_items WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?) ORDER BY id DESC LIMIT 1`,
+            [resNotes.bar_id, it.name]
+          );
+          const unitPrice = Number(menuRows[0]?.selling_price || 0);
+          if (unitPrice > 0) itemsTotal += unitPrice * Number(it.quantity || 1);
+        }
+      }
+    }
 
     let computedTotal = tableTotal + itemsTotal;
 
@@ -881,7 +922,50 @@ router.get("/:reference_id", requireAuth, async (req, res) => {
       lineItemsByPaymentId.set(payment.id, lineItems);
     }
 
-    return res.json({ success: true, data: normalizePaymentRow(payment, lineItemsByPaymentId) });
+    const normalized = normalizePaymentRow(payment, lineItemsByPaymentId);
+
+    // For reservation payments, compute the true total order amount and remaining balance
+    if (payment.payment_type === 'reservation' && payment.related_id) {
+      try {
+        const [[tableSumRow]] = await pool.query(
+          `SELECT COALESCE(SUM(bt.price), 0) AS table_total
+           FROM reservation_tables rt
+           JOIN bar_tables bt ON bt.id = rt.table_id
+           WHERE rt.reservation_id = ?`,
+          [payment.related_id]
+        );
+        const tableTotal = Number(tableSumRow?.table_total || 0);
+
+        const [[itemSumRow]] = await pool.query(
+          `SELECT COALESCE(SUM(ri.quantity * ri.unit_price), 0) AS items_total
+           FROM reservation_items ri WHERE ri.reservation_id = ?`,
+          [payment.related_id]
+        );
+        let itemsTotal = Number(itemSumRow?.items_total || 0);
+
+        // Fall back to notes parsing if reservation_items is empty
+        if (itemsTotal === 0 && payment.reservation_notes) {
+          const parsedItems = parseReservationOrderItems(payment.reservation_notes);
+          const [[resBar]] = await pool.query(`SELECT bar_id FROM reservations WHERE id = ? LIMIT 1`, [payment.related_id]);
+          for (const it of parsedItems) {
+            const [menuRows] = await pool.query(
+              `SELECT selling_price FROM menu_items WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?) ORDER BY id DESC LIMIT 1`,
+              [resBar?.bar_id, it.name]
+            );
+            const unitPrice = Number(menuRows[0]?.selling_price || 0);
+            if (unitPrice > 0) itemsTotal += unitPrice * Number(it.quantity || 1);
+          }
+        }
+
+        const totalOrderAmount = tableTotal + itemsTotal;
+        if (totalOrderAmount > 0) {
+          normalized.total_order_amount = totalOrderAmount;
+          normalized.remaining_balance = Math.max(0, totalOrderAmount - Number(payment.amount || 0));
+        }
+      } catch (_) {}
+    }
+
+    return res.json({ success: true, data: normalized });
   } catch (err) {
     console.error("GET PAYMENT ERROR:", err);
     return res.status(500).json({ success: false, message: "Server error" });
