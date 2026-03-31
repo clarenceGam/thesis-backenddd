@@ -50,9 +50,9 @@ router.post("/verify/:reference_id", async (req, res) => {
         );
         paymongoPayment = response.data.data;
 
-        // Check if source is chargeable (paid)
-        if (paymongoPayment.attributes.status === 'chargeable') {
-          console.log(`Source ${payment.paymongo_source_id} is chargeable. Updating payment...`);
+        // Check if source is already paid/consumed or can be attached now
+        if (['chargeable', 'paid', 'consumed'].includes(paymongoPayment.attributes.status)) {
+          console.log(`Source ${payment.paymongo_source_id} is ${paymongoPayment.attributes.status}. Updating payment...`);
           
           // Update payment status
           await pool.query(
