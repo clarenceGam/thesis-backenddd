@@ -373,16 +373,18 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
     // Supplement with any items from notes not already represented in reservation_items
     {
       const [[resNotes]] = await conn.query(
-        `SELECT notes, bar_id,
-                (SELECT GROUP_CONCAT(DISTINCT LOWER(m.menu_name))
-                 FROM reservation_items ri2
-                 LEFT JOIN menu_items m ON m.id = ri2.menu_item_id
-                 WHERE ri2.reservation_id = ?) AS db_item_names
-         FROM reservations WHERE id = ? LIMIT 1`,
-        [payment.related_id, payment.related_id]
+        `SELECT notes, bar_id FROM reservations WHERE id = ? LIMIT 1`,
+        [payment.related_id]
       );
       if (resNotes?.notes) {
-        const dbNames = new Set((resNotes.db_item_names || '').split(',').map(s => s.trim()).filter(Boolean));
+        const [dbItems] = await conn.query(
+          `SELECT COALESCE(m.menu_name, '') AS menu_name
+           FROM reservation_items ri2
+           LEFT JOIN menu_items m ON m.id = ri2.menu_item_id
+           WHERE ri2.reservation_id = ?`,
+          [payment.related_id]
+        );
+        const dbNames = new Set(dbItems.map(i => (i.menu_name || '').toLowerCase().trim()).filter(Boolean));
         const parsedItems = parseReservationOrderItems(resNotes.notes);
         for (const it of parsedItems) {
           if (dbNames.has(it.name.toLowerCase().trim())) continue;
@@ -962,15 +964,17 @@ router.get("/:reference_id", requireAuth, async (req, res) => {
         // Supplement with notes items not already in reservation_items
         if (payment.reservation_notes) {
           const [[resBar]] = await pool.query(
-            `SELECT bar_id,
-                    (SELECT GROUP_CONCAT(DISTINCT LOWER(m.menu_name))
-                     FROM reservation_items ri2
-                     LEFT JOIN menu_items m ON m.id = ri2.menu_item_id
-                     WHERE ri2.reservation_id = ?) AS db_item_names
-             FROM reservations WHERE id = ? LIMIT 1`,
-            [payment.related_id, payment.related_id]
+            `SELECT bar_id FROM reservations WHERE id = ? LIMIT 1`,
+            [payment.related_id]
           );
-          const dbNames = new Set((resBar?.db_item_names || '').split(',').map(s => s.trim()).filter(Boolean));
+          const [dbItems] = await pool.query(
+            `SELECT COALESCE(m.menu_name, '') AS menu_name
+             FROM reservation_items ri2
+             LEFT JOIN menu_items m ON m.id = ri2.menu_item_id
+             WHERE ri2.reservation_id = ?`,
+            [payment.related_id]
+          );
+          const dbNames = new Set(dbItems.map(i => (i.menu_name || '').toLowerCase().trim()).filter(Boolean));
           const parsedItems = parseReservationOrderItems(payment.reservation_notes);
           for (const it of parsedItems) {
             if (dbNames.has(it.name.toLowerCase().trim())) continue;
