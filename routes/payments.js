@@ -341,16 +341,18 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
 
     let computedTotal = tableTotal + itemsTotal;
 
-    // Fallback to payment_line_items if reservation_items is empty
-    if (computedTotal === 0 && payment.id) {
+    // Always consider payment_line_items total (captures full order breakdown from checkout)
+    let pliTotal = 0;
+    if (payment.id) {
       const [[pliSumRow]] = await conn.query(
         `SELECT COALESCE(SUM(line_total), 0) AS pli_total
          FROM payment_line_items
          WHERE payment_transaction_id = ?`,
         [payment.id]
       );
-      computedTotal = Number(pliSumRow?.pli_total || 0);
+      pliTotal = Number(pliSumRow?.pli_total || 0);
     }
+    computedTotal = Math.max(computedTotal, pliTotal);
 
     const [[resRow]] = await conn.query(
       `SELECT deposit_amount FROM reservations WHERE id = ? LIMIT 1`,
@@ -358,10 +360,10 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
     );
 
     const paidAmount = Number(payment.amount || 0);
+    // If no computed total, fall back to deposit to avoid zero target
     const depositAmount = Number(resRow?.deposit_amount || 0);
-    // If no computed total, fall back to deposit to avoid marking fully paid on deposits
     const targetTotal = computedTotal > 0 ? computedTotal : depositAmount;
-    const newPaymentStatus = targetTotal > 0 && paidAmount >= targetTotal ? 'paid' : 'partial';
+    const newPaymentStatus = targetTotal > 0 && paidAmount < targetTotal ? 'partial' : 'paid';
 
     await conn.query(
       "UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?",
