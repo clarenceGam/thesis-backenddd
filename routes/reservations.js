@@ -470,7 +470,7 @@ router.get("/bars/:id/available-tables", async (req, res) => {
                  AND COALESCE(r.reserved_until, TIMESTAMPADD(MINUTE, ?, TIMESTAMP(CONCAT(r.reservation_date, ' ', r.reservation_time)))) > ?
              )
            ORDER BY t.capacity ASC, t.table_number ASC`,
-          [...baseParams, barId, date, formatMysqlDateTime(reservedUntil), minutes, formatMysqlDateTime(reservationStart)]
+          [...baseParams, barId, date, formatMysqlDateTime(requestedEnd), minutes, formatMysqlDateTime(requestedStart)]
         )
       : await pool.query(
           `SELECT t.id, t.bar_id, t.table_number, t.floor_assignment AS floor, t.capacity, t.is_active,
