@@ -1081,6 +1081,22 @@ router.get(
 
       const reservation = rows[0];
 
+      // Fetch all tables from junction table for multi-table support
+      const [rtTables] = await pool.query(
+        `SELECT rt.table_id, bt.table_number, bt.capacity, bt.price, bt.floor_assignment AS floor
+         FROM reservation_tables rt
+         JOIN bar_tables bt ON bt.id = rt.table_id
+         WHERE rt.reservation_id = ?
+         ORDER BY bt.table_number`,
+        [reservation.id]
+      );
+      if (rtTables.length > 0) {
+        reservation.tables = rtTables;
+        reservation.table_price = rtTables.reduce((sum, t) => sum + Number(t.price || 0), 0);
+      } else {
+        reservation.tables = [{ table_id: reservation.table_id, table_number: reservation.table_number, capacity: reservation.capacity, price: reservation.table_price, floor: null }];
+      }
+
       // Fetch reservation items if table exists
       const [riCheck] = await pool.query(
         `SELECT 1 FROM INFORMATION_SCHEMA.TABLES
@@ -1112,8 +1128,11 @@ router.get(
       );
       const payment = paymentRows[0] || null;
 
-      const totalAmount = items.reduce((sum, it) => sum + Number(it.line_total || 0), 0)
+      const computedTotal = items.reduce((sum, it) => sum + Number(it.line_total || 0), 0)
         + Number(reservation.table_price || 0);
+      // Use max of computed total vs deposit/payment to avoid showing Fully Paid when items are in notes
+      const paidAmount = payment?.status === 'paid' ? Number(payment.amount || 0) : Number(reservation.deposit_amount || 0);
+      const totalAmount = Math.max(computedTotal, paidAmount);
 
       return res.json({
         success: true,
