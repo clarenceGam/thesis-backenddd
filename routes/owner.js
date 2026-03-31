@@ -1383,7 +1383,6 @@ router.post(
       );
       if (!user) return res.status(404).json({ success: false, message: "User not found" });
 
-      const bcrypt = require("bcryptjs");
       const hashed = await bcrypt.hash(new_password, 10);
       await pool.query("UPDATE users SET password = ?, updated_at = NOW() WHERE id = ?", [hashed, userId]);
 
