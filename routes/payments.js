@@ -321,21 +321,48 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
     );
     await deductInventoryForOrder(conn, payment.related_id);
   } else if (payment.payment_type === 'reservation') {
-    const [[resRow]] = await conn.query(
-      `SELECT COALESCE(t.price, 0) + COALESCE((
-         SELECT SUM(ri.quantity * ri.unit_price) FROM reservation_items ri WHERE ri.reservation_id = r.id
-       ), 0) AS total_amount,
-       r.deposit_amount
-       FROM reservations r
-       LEFT JOIN bar_tables t ON t.id = r.table_id
-       WHERE r.id = ? LIMIT 1`,
+    // Compute total from tables + reservation_items; fallback to payment_line_items; otherwise use deposit
+    const [[tableSumRow]] = await conn.query(
+      `SELECT COALESCE(SUM(bt.price), 0) AS table_total
+       FROM reservation_tables rt
+       JOIN bar_tables bt ON bt.id = rt.table_id
+       WHERE rt.reservation_id = ?`,
       [payment.related_id]
     );
-    const totalAmount = Number(resRow?.total_amount || 0);
+    const tableTotal = Number(tableSumRow?.table_total || 0);
+
+    const [[itemSumRow]] = await conn.query(
+      `SELECT COALESCE(SUM(ri.quantity * ri.unit_price), 0) AS items_total
+       FROM reservation_items ri
+       WHERE ri.reservation_id = ?`,
+      [payment.related_id]
+    );
+    const itemsTotal = Number(itemSumRow?.items_total || 0);
+
+    let computedTotal = tableTotal + itemsTotal;
+
+    // Fallback to payment_line_items if reservation_items is empty
+    if (computedTotal === 0 && payment.id) {
+      const [[pliSumRow]] = await conn.query(
+        `SELECT COALESCE(SUM(line_total), 0) AS pli_total
+         FROM payment_line_items
+         WHERE payment_transaction_id = ?`,
+        [payment.id]
+      );
+      computedTotal = Number(pliSumRow?.pli_total || 0);
+    }
+
+    const [[resRow]] = await conn.query(
+      `SELECT deposit_amount FROM reservations WHERE id = ? LIMIT 1`,
+      [payment.related_id]
+    );
+
     const paidAmount = Number(payment.amount || 0);
-    // If no computed total, fall back to deposit_amount to avoid marking full paid on deposits.
-    const targetTotal = totalAmount > 0 ? totalAmount : Number(resRow?.deposit_amount || 0);
+    const depositAmount = Number(resRow?.deposit_amount || 0);
+    // If no computed total, fall back to deposit to avoid marking fully paid on deposits
+    const targetTotal = computedTotal > 0 ? computedTotal : depositAmount;
     const newPaymentStatus = targetTotal > 0 && paidAmount >= targetTotal ? 'paid' : 'partial';
+
     await conn.query(
       "UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?",
       [newPaymentStatus, payment.related_id]
