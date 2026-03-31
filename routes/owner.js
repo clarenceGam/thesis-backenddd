@@ -2142,12 +2142,38 @@ router.get(
 );
 
 // Helper function to validate event time against bar operating hours
+function buildEventOperatingHoursMap(barRow) {
+  if (!barRow || typeof barRow !== 'object') return null;
+
+  const mapLegacyDay = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return null;
+    const parts = text.split(/[–-]/).map((part) => part.trim()).filter(Boolean);
+    if (parts.length < 2) return null;
+    return { open: parts[0], close: parts[1] };
+  };
+
+  const map = {
+    Monday: mapLegacyDay(barRow.monday_hours),
+    Tuesday: mapLegacyDay(barRow.tuesday_hours),
+    Wednesday: mapLegacyDay(barRow.wednesday_hours),
+    Thursday: mapLegacyDay(barRow.thursday_hours),
+    Friday: mapLegacyDay(barRow.friday_hours),
+    Saturday: mapLegacyDay(barRow.saturday_hours),
+    Sunday: mapLegacyDay(barRow.sunday_hours),
+  };
+
+  return map;
+}
+
 function isEventWithinOperatingHours(eventDate, startTime, endTime, operatingHours) {
   if (!operatingHours || !startTime || !endTime) return true; // Skip validation if data missing
   
   try {
     const eventDay = new Date(eventDate).toLocaleDateString('en-US', { weekday: 'long' });
-    const hours = typeof operatingHours === 'string' ? JSON.parse(operatingHours) : operatingHours;
+    const hours = typeof operatingHours === 'string'
+      ? JSON.parse(operatingHours)
+      : (operatingHours.operating_hours ? (typeof operatingHours.operating_hours === 'string' ? JSON.parse(operatingHours.operating_hours) : operatingHours.operating_hours) : buildEventOperatingHoursMap(operatingHours));
     
     if (!hours || typeof hours !== 'object') return true;
     
@@ -2163,8 +2189,25 @@ function isEventWithinOperatingHours(eventDate, startTime, endTime, operatingHou
     
     // Convert times to minutes for comparison
     const toMinutes = (time) => {
-      const [hours, minutes] = time.split(':').map(Number);
-      return hours * 60 + minutes;
+      const value = String(time || '').trim();
+      const ampmMatch = value.match(/^(\d{1,2}):(\d{2})(?:\s*(AM|PM))$/i);
+      if (ampmMatch) {
+        let hours = Number(ampmMatch[1]) || 0;
+        const minutes = Number(ampmMatch[2]) || 0;
+        const meridiem = String(ampmMatch[3] || '').toUpperCase();
+        if (meridiem === 'PM' && hours !== 12) hours += 12;
+        if (meridiem === 'AM' && hours === 12) hours = 0;
+        return hours * 60 + minutes;
+      }
+
+      const plainMatch = value.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+      if (plainMatch) {
+        const hours = Number(plainMatch[1]) || 0;
+        const minutes = Number(plainMatch[2]) || 0;
+        return hours * 60 + minutes;
+      }
+
+      return NaN;
     };
     
     const eventStart = toMinutes(startTime);
@@ -2198,10 +2241,15 @@ router.post(
       const { title, description, event_date, start_time, end_time, entry_price, max_capacity } = req.body || {};
       if (!title || !event_date) return res.status(400).json({ success: false, message: "title and event_date required" });
 
-      // Get bar operating hours
-      const [barData] = await pool.query('SELECT operating_hours FROM bars WHERE id = ?', [barId]);
+      // Get bar operating hours using schema-safe day fields
+      const [barData] = await pool.query(
+        `SELECT monday_hours, tuesday_hours, wednesday_hours, thursday_hours,
+                friday_hours, saturday_hours, sunday_hours
+         FROM bars WHERE id = ?`,
+        [barId]
+      );
       if (barData.length > 0) {
-        const validation = isEventWithinOperatingHours(event_date, start_time, end_time, barData[0].operating_hours);
+        const validation = isEventWithinOperatingHours(event_date, start_time, end_time, barData[0]);
         if (validation && !validation.valid) {
           return res.status(400).json({ success: false, message: validation.message });
         }
@@ -2250,9 +2298,14 @@ router.patch(
           const startTime = req.body.start_time || existingEvent[0].start_time;
           const endTime = req.body.end_time || existingEvent[0].end_time;
           
-          const [barData] = await pool.query('SELECT operating_hours FROM bars WHERE id = ?', [barId]);
+          const [barData] = await pool.query(
+            `SELECT monday_hours, tuesday_hours, wednesday_hours, thursday_hours,
+                    friday_hours, saturday_hours, sunday_hours
+             FROM bars WHERE id = ?`,
+            [barId]
+          );
           if (barData.length > 0) {
-            const validation = isEventWithinOperatingHours(eventDate, startTime, endTime, barData[0].operating_hours);
+            const validation = isEventWithinOperatingHours(eventDate, startTime, endTime, barData[0]);
             if (validation && !validation.valid) {
               return res.status(400).json({ success: false, message: validation.message });
             }
