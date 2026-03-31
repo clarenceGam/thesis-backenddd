@@ -459,9 +459,18 @@ router.get("/bars/:id/available-tables", async (req, res) => {
                  AND r.status IN ('pending','approved','paid','confirmed','checked_in')
                  AND TIMESTAMP(CONCAT(r.reservation_date, ' ', r.reservation_time)) < ?
                  AND COALESCE(r.reserved_until, TIMESTAMPADD(MINUTE, ?, TIMESTAMP(CONCAT(r.reservation_date, ' ', r.reservation_time)))) > ?
+               UNION ALL
+               SELECT rt.table_id
+               FROM reservations r
+               JOIN reservation_tables rt ON rt.reservation_id = r.id
+               WHERE r.bar_id = ?
+                 AND r.reservation_date = ?
+                 AND r.status IN ('pending','approved','paid','confirmed','checked_in')
+                 AND TIMESTAMP(CONCAT(r.reservation_date, ' ', r.reservation_time)) < ?
+                 AND COALESCE(r.reserved_until, TIMESTAMPADD(MINUTE, ?, TIMESTAMP(CONCAT(r.reservation_date, ' ', r.reservation_time)))) > ?
              )
            ORDER BY t.capacity ASC, t.table_number ASC`,
-          baseParams
+          [...baseParams, barId, date, formatMysqlDateTime(reservedUntil), minutes, formatMysqlDateTime(reservationStart)]
         )
       : await pool.query(
           `SELECT t.id, t.bar_id, t.table_number, t.floor_assignment AS floor, t.capacity, t.is_active,
@@ -480,9 +489,17 @@ router.get("/bars/:id/available-tables", async (req, res) => {
                  AND r.reservation_date = ?
                  AND r.reservation_time = ?
                  AND r.status IN ('pending','approved','paid','confirmed','checked_in')
+               UNION ALL
+               SELECT rt.table_id
+               FROM reservations r
+               JOIN reservation_tables rt ON rt.reservation_id = r.id
+               WHERE r.bar_id = ?
+                 AND r.reservation_date = ?
+                 AND r.reservation_time = ?
+                 AND r.status IN ('pending','approved','paid','confirmed','checked_in')
              )
            ORDER BY t.capacity ASC, t.table_number ASC`,
-          baseParams
+          [...baseParams, barId, date, normalizedTime]
         );
 
     return res.json({ success: true, data: rows, available_hours: hourlySlots });
