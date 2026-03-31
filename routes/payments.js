@@ -119,12 +119,13 @@ async function buildReservationLineItems(conn, reservation) {
 
   if (riCheck.length) {
     const [reservationItems] = await conn.query(
-      `SELECT ri.menu_item_id, m.menu_name, ri.quantity, ri.unit_price,
+      `SELECT ri.menu_item_id, COALESCE(m.menu_name, CONCAT('Item #', ri.menu_item_id)) AS menu_name,
+              ri.quantity, ri.unit_price,
               (ri.quantity * ri.unit_price) AS line_total
        FROM reservation_items ri
-       JOIN menu_items m ON m.id = ri.menu_item_id
+       LEFT JOIN menu_items m ON m.id = ri.menu_item_id
        WHERE ri.reservation_id = ?
-       ORDER BY m.menu_name`,
+       ORDER BY COALESCE(m.menu_name, 'zzz')`,
       [reservation.id]
     );
 
@@ -142,10 +143,12 @@ async function buildReservationLineItems(conn, reservation) {
       });
     }
 
-    // If reservation_items table exists but has no rows, fall back to notes parsing
-    if (reservationItems.length === 0 && reservation.notes) {
+    // Supplement with any items from notes not already in results
+    if (reservation.notes) {
+      const dbNames = new Set(lineItems.filter(i => i.item_type === 'menu').map(i => (i.item_name || '').toLowerCase().trim()));
       const parsedItems = parseReservationOrderItems(reservation.notes);
       for (const it of parsedItems) {
+        if (dbNames.has(it.name.toLowerCase().trim())) continue;
         const [menuRows] = await conn.query(
           `SELECT selling_price FROM menu_items WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?) ORDER BY id DESC LIMIT 1`,
           [reservation.bar_id, it.name]
@@ -197,11 +200,17 @@ function normalizePaymentRow(payment, lineItemsByPaymentId) {
   const tableItem = items.find((i) => i.item_type === "table") || null;
   const menuItems = items.filter((i) => i.item_type === "menu");
 
+  const totalFromLineItems = items.reduce((sum, i) => sum + Number(i.line_total || 0), 0);
+  const paidAmount = Number(payment.amount || 0);
+  const totalOrderAmount = totalFromLineItems > paidAmount ? totalFromLineItems : 0;
+  const remainingBalance = totalOrderAmount > 0 ? Math.max(0, totalOrderAmount - paidAmount) : 0;
+
   return {
     ...payment,
     table_price: tableItem ? Number(tableItem.line_total || 0) : 0,
     menu_items: menuItems,
     line_items: items,
+    ...(totalOrderAmount > 0 ? { total_order_amount: totalOrderAmount, remaining_balance: remainingBalance } : {}),
   };
 }
 
@@ -361,15 +370,22 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
     );
     let itemsTotal = Number(itemSumRow?.items_total || 0);
 
-    // If reservation_items is empty, fall back to notes parsing for correct total
-    if (itemsTotal === 0) {
+    // Supplement with any items from notes not already represented in reservation_items
+    {
       const [[resNotes]] = await conn.query(
-        `SELECT notes, bar_id FROM reservations WHERE id = ? LIMIT 1`,
-        [payment.related_id]
+        `SELECT notes, bar_id,
+                (SELECT GROUP_CONCAT(DISTINCT LOWER(m.menu_name))
+                 FROM reservation_items ri2
+                 LEFT JOIN menu_items m ON m.id = ri2.menu_item_id
+                 WHERE ri2.reservation_id = ?) AS db_item_names
+         FROM reservations WHERE id = ? LIMIT 1`,
+        [payment.related_id, payment.related_id]
       );
       if (resNotes?.notes) {
+        const dbNames = new Set((resNotes.db_item_names || '').split(',').map(s => s.trim()).filter(Boolean));
         const parsedItems = parseReservationOrderItems(resNotes.notes);
         for (const it of parsedItems) {
+          if (dbNames.has(it.name.toLowerCase().trim())) continue;
           const [menuRows] = await conn.query(
             `SELECT selling_price FROM menu_items WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?) ORDER BY id DESC LIMIT 1`,
             [resNotes.bar_id, it.name]
@@ -943,11 +959,21 @@ router.get("/:reference_id", requireAuth, async (req, res) => {
         );
         let itemsTotal = Number(itemSumRow?.items_total || 0);
 
-        // Fall back to notes parsing if reservation_items is empty
-        if (itemsTotal === 0 && payment.reservation_notes) {
+        // Supplement with notes items not already in reservation_items
+        if (payment.reservation_notes) {
+          const [[resBar]] = await pool.query(
+            `SELECT bar_id,
+                    (SELECT GROUP_CONCAT(DISTINCT LOWER(m.menu_name))
+                     FROM reservation_items ri2
+                     LEFT JOIN menu_items m ON m.id = ri2.menu_item_id
+                     WHERE ri2.reservation_id = ?) AS db_item_names
+             FROM reservations WHERE id = ? LIMIT 1`,
+            [payment.related_id, payment.related_id]
+          );
+          const dbNames = new Set((resBar?.db_item_names || '').split(',').map(s => s.trim()).filter(Boolean));
           const parsedItems = parseReservationOrderItems(payment.reservation_notes);
-          const [[resBar]] = await pool.query(`SELECT bar_id FROM reservations WHERE id = ? LIMIT 1`, [payment.related_id]);
           for (const it of parsedItems) {
+            if (dbNames.has(it.name.toLowerCase().trim())) continue;
             const [menuRows] = await pool.query(
               `SELECT selling_price FROM menu_items WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?) ORDER BY id DESC LIMIT 1`,
               [resBar?.bar_id, it.name]

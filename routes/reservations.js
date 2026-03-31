@@ -1138,21 +1138,24 @@ router.get(
       let items = [];
       if (riCheck.length) {
         const [itemRows] = await pool.query(
-          `SELECT ri.menu_item_id, m.menu_name, ri.quantity, ri.unit_price,
+          `SELECT ri.menu_item_id, COALESCE(m.menu_name, CONCAT('Item #', ri.menu_item_id)) AS menu_name,
+                  ri.quantity, ri.unit_price,
                   (ri.quantity * ri.unit_price) AS line_total
            FROM reservation_items ri
-           JOIN menu_items m ON m.id = ri.menu_item_id
+           LEFT JOIN menu_items m ON m.id = ri.menu_item_id
            WHERE ri.reservation_id = ?
-           ORDER BY m.menu_name`,
+           ORDER BY COALESCE(m.menu_name, 'zzz')`,
           [reservation.id]
         );
         items = itemRows;
       }
 
-      // If no items from reservation_items, fall back to notes parsing
-      if (items.length === 0 && reservation.notes) {
+      // Supplement with any items from notes not already represented in DB results
+      if (reservation.notes) {
+        const dbItemNames = new Set(items.map(it => (it.menu_name || '').toLowerCase().trim()));
         const parsedItems = parseReservationOrderItems(reservation.notes);
         for (const it of parsedItems) {
+          if (dbItemNames.has(it.name.toLowerCase().trim())) continue;
           const [[menuRow]] = await pool.query(
             `SELECT selling_price FROM menu_items WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?) ORDER BY id DESC LIMIT 1`,
             [reservation.bar_id, it.name]
