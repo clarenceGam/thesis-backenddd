@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../config/database");
 const paymongoService = require("../services/paymongoService");
+const { deductInventoryForReservation } = require("./payments");
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MANUAL PAYMENT CHECK (FOR DEVELOPMENT/TESTING)
@@ -248,22 +249,61 @@ async function updateOrder(payment) {
 async function updateReservation(payment) {
   const paidAmount = Number(payment.amount || 0);
   let newPaymentStatus = 'paid';
+  let shouldDeductInventory = true;
   try {
-    const [[resRow]] = await pool.query(
-      `SELECT COALESCE(t.price, 0) + COALESCE((
-         SELECT SUM(ri.quantity * ri.unit_price) FROM reservation_items ri WHERE ri.reservation_id = r.id
-       ), 0) AS total_amount
-       FROM reservations r
-       LEFT JOIN bar_tables t ON t.id = r.table_id
-       WHERE r.id = ? LIMIT 1`,
+    const [[existingReservation]] = await pool.query(
+      `SELECT payment_status
+       FROM reservations
+       WHERE id = ?
+       LIMIT 1`,
       [payment.related_id]
     );
-    const totalAmount = Number(resRow?.total_amount || 0);
+    shouldDeductInventory = !['partial', 'paid'].includes(String(existingReservation?.payment_status || '').toLowerCase());
+  } catch (_) {}
+  try {
+    let tableTotal = 0;
+    try {
+      const [[tableSumRow]] = await pool.query(
+        `SELECT COALESCE(SUM(bt.price), 0) AS table_total
+         FROM reservation_tables rt
+         JOIN bar_tables bt ON bt.id = rt.table_id
+         WHERE rt.reservation_id = ?`,
+        [payment.related_id]
+      );
+      tableTotal = Number(tableSumRow?.table_total || 0);
+    } catch (_) {}
+
+    let itemsTotal = 0;
+    try {
+      const [[itemSumRow]] = await pool.query(
+        `SELECT COALESCE(SUM(ri.quantity * ri.unit_price), 0) AS items_total
+         FROM reservation_items ri
+         WHERE ri.reservation_id = ?`,
+        [payment.related_id]
+      );
+      itemsTotal = Number(itemSumRow?.items_total || 0);
+    } catch (_) {}
+
+    let totalAmount = tableTotal + itemsTotal;
+
+    try {
+      const [[pliSumRow]] = await pool.query(
+        `SELECT COALESCE(SUM(line_total), 0) AS pli_total
+         FROM payment_line_items
+         WHERE payment_transaction_id = ?`,
+        [payment.id]
+      );
+      totalAmount = Math.max(totalAmount, Number(pliSumRow?.pli_total || 0));
+    } catch (_) {}
+
     newPaymentStatus = totalAmount > 0 && paidAmount < totalAmount ? 'partial' : 'paid';
   } catch (err) {
     console.error('PAYMENT_CHECK_UPDATE_RESERVATION_ERR:', err.message);
   }
   await pool.query("UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?", [newPaymentStatus, payment.related_id]);
+  if (shouldDeductInventory) {
+    await deductInventoryForReservation(pool, payment.related_id, payment.id);
+  }
   await createPayout(payment);
   console.log(`✅ Reservation ${payment.related_id} marked as CONFIRMED (payment ${newPaymentStatus})`);
 }

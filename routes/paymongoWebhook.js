@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const pool = require("../config/database");
 const paymongoService = require("../services/paymongoService");
+const { deductInventoryForReservation } = require("./payments");
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PAYMONGO WEBHOOK HANDLER
@@ -248,6 +249,18 @@ async function handleOrderPaymentPaid(payment) {
 async function handleReservationPaymentPaid(payment) {
   const paidAmount = Number(payment.amount || 0);
   let newPaymentStatus = 'paid';
+  let shouldDeductInventory = true;
+
+  try {
+    const [[existingReservation]] = await pool.query(
+      `SELECT payment_status
+       FROM reservations
+       WHERE id = ?
+       LIMIT 1`,
+      [payment.related_id]
+    );
+    shouldDeductInventory = !['partial', 'paid'].includes(String(existingReservation?.payment_status || '').toLowerCase());
+  } catch (_) {}
 
   try {
     let tableTotal = 0;
@@ -304,6 +317,10 @@ async function handleReservationPaymentPaid(payment) {
     "UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?",
     [newPaymentStatus, payment.related_id]
   );
+
+  if (shouldDeductInventory) {
+    await deductInventoryForReservation(pool, payment.related_id, payment.id);
+  }
 
   // Create payout record
   await createPayout(payment);

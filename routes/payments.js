@@ -37,7 +37,7 @@ async function hasReservationPaymentTransactionIdColumn(conn) {
 
 function parseReservationOrderItems(notes) {
   if (!notes) return [];
-  const m = String(notes).match(/Order:\s*(.+)/i);
+  const m = String(notes).match(/Order:\s*(.+?)(?:\s*\|\|\s*Packages:|$)/i);
   if (!m) return [];
   return m[1]
     .split(",")
@@ -51,6 +51,141 @@ function parseReservationOrderItems(notes) {
         quantity: Number(qtyMatch[2]) || 1,
       };
     });
+}
+
+function parseReservationPackageItems(notes) {
+  if (!notes) return [];
+  const m = String(notes).match(/Packages:\s*(.+)$/i);
+  if (!m) return [];
+  return m[1]
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const structuredMatch = entry.match(/^pkg_(\d+)::(.+?)\s*x\s*(\d+)$/i);
+      if (structuredMatch) {
+        return {
+          package_id: Number(structuredMatch[1]) || null,
+          name: structuredMatch[2].trim(),
+          quantity: Number(structuredMatch[3]) || 1,
+        };
+      }
+
+      const qtyMatch = entry.match(/(.+?)\s*x\s*(\d+)$/i);
+      if (!qtyMatch) return { package_id: null, name: entry, quantity: 1 };
+      return {
+        package_id: null,
+        name: qtyMatch[1].trim(),
+        quantity: Number(qtyMatch[2]) || 1,
+      };
+    });
+}
+
+function safeParseJson(value) {
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(value);
+  } catch (_) {
+    return null;
+  }
+}
+
+async function resolveMenuInventoryItemId(conn, barId, menuItemId, itemName) {
+  if (Number(menuItemId) > 0) {
+    const [[menuRow]] = await conn.query(
+      `SELECT inventory_item_id
+       FROM menu_items
+       WHERE id = ? AND bar_id = ?
+       LIMIT 1`,
+      [menuItemId, barId]
+    );
+    if (menuRow?.inventory_item_id) return Number(menuRow.inventory_item_id);
+  }
+
+  if (!itemName) return null;
+
+  const [[menuRowByName]] = await conn.query(
+    `SELECT inventory_item_id
+     FROM menu_items
+     WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?)
+     ORDER BY id DESC
+     LIMIT 1`,
+    [barId, itemName]
+  );
+
+  return menuRowByName?.inventory_item_id ? Number(menuRowByName.inventory_item_id) : null;
+}
+
+async function resolveInventoryItemIdByName(conn, barId, itemName) {
+  if (!itemName) return null;
+
+  const [[row]] = await conn.query(
+    `SELECT i.id AS inventory_item_id
+     FROM inventory_items i
+     LEFT JOIN menu_items m ON m.inventory_item_id = i.id AND m.bar_id = ?
+     WHERE i.bar_id = ?
+       AND (LOWER(i.name) = LOWER(?) OR LOWER(m.menu_name) = LOWER(?))
+     ORDER BY CASE WHEN LOWER(m.menu_name) = LOWER(?) THEN 0 ELSE 1 END, i.id ASC
+     LIMIT 1`,
+    [barId, barId, itemName, itemName, itemName]
+  );
+
+  return row?.inventory_item_id ? Number(row.inventory_item_id) : null;
+}
+
+async function appendPackageInventoryDeductions(conn, barId, packageId, packageName, packageQuantity, totalsMap, coveredNames) {
+  const qty = Number(packageQuantity || 0);
+  if (!qty) return false;
+
+  let pkg = null;
+
+  if (Number(packageId) > 0) {
+    const [[pkgRow]] = await conn.query(
+      `SELECT id, name
+       FROM bar_packages
+       WHERE id = ? AND bar_id = ? AND deleted_at IS NULL
+       LIMIT 1`,
+      [packageId, barId]
+    );
+    pkg = pkgRow || null;
+  }
+
+  if (!pkg && packageName) {
+    const [[pkgRowByName]] = await conn.query(
+      `SELECT id, name
+       FROM bar_packages
+       WHERE bar_id = ? AND deleted_at IS NULL AND LOWER(name) = LOWER(?)
+       ORDER BY id DESC
+       LIMIT 1`,
+      [barId, packageName]
+    );
+    pkg = pkgRowByName || null;
+  }
+
+  if (!pkg?.id) return false;
+
+  const [inclusions] = await conn.query(
+    `SELECT item_name, quantity
+     FROM package_inclusions
+     WHERE package_id = ?
+     ORDER BY id ASC`,
+    [pkg.id]
+  );
+
+  for (const inclusion of inclusions) {
+    const inventoryItemId = await resolveInventoryItemIdByName(conn, barId, inclusion.item_name);
+    if (!inventoryItemId) continue;
+    const inclusionQty = Number(inclusion.quantity || 0) * qty;
+    if (!inclusionQty) continue;
+    totalsMap.set(inventoryItemId, (totalsMap.get(inventoryItemId) || 0) + inclusionQty);
+  }
+
+  if (coveredNames && pkg.name) {
+    coveredNames.add(String(pkg.name).toLowerCase().trim());
+  }
+
+  return true;
 }
 
 async function upsertPaymentLineItems(conn, paymentId, lineItems) {
@@ -145,10 +280,10 @@ async function buildReservationLineItems(conn, reservation) {
 
     // Supplement with any items from notes not already in results
     if (reservation.notes) {
-      const dbNames = new Set(lineItems.filter(i => i.item_type === 'menu').map(i => (i.item_name || '').toLowerCase().trim()));
+      const coveredNames = new Set(lineItems.filter(i => i.item_type === 'menu').map(i => (i.item_name || '').toLowerCase().trim()));
       const parsedItems = parseReservationOrderItems(reservation.notes);
       for (const it of parsedItems) {
-        if (dbNames.has(it.name.toLowerCase().trim())) continue;
+        if (coveredNames.has(it.name.toLowerCase().trim())) continue;
         const [menuRows] = await conn.query(
           `SELECT selling_price FROM menu_items WHERE bar_id = ? AND LOWER(menu_name) = LOWER(?) ORDER BY id DESC LIMIT 1`,
           [reservation.bar_id, it.name]
@@ -163,11 +298,64 @@ async function buildReservationLineItems(conn, reservation) {
             line_total: unitPrice * Number(it.quantity || 1),
             metadata: { reservation_id: reservation.id },
           });
+          coveredNames.add(it.name.toLowerCase().trim());
+          continue;
         }
+
+        const [[pkgRow]] = await conn.query(
+          `SELECT id, name, price
+           FROM bar_packages
+           WHERE bar_id = ? AND deleted_at IS NULL AND LOWER(name) = LOWER(?)
+           ORDER BY id DESC
+           LIMIT 1`,
+          [reservation.bar_id, it.name]
+        );
+        if (!pkgRow?.id) continue;
+
+        lineItems.push({
+          item_type: "package",
+          item_name: pkgRow.name,
+          quantity: Number(it.quantity || 1),
+          unit_price: Number(pkgRow.price || 0),
+          line_total: Number(pkgRow.price || 0) * Number(it.quantity || 1),
+          metadata: {
+            reservation_id: reservation.id,
+            package_id: pkgRow.id,
+          },
+        });
+        coveredNames.add(String(pkgRow.name || '').toLowerCase().trim());
+      }
+
+      const parsedPackages = parseReservationPackageItems(reservation.notes);
+      for (const pkg of parsedPackages) {
+        if (coveredNames.has(pkg.name.toLowerCase().trim())) continue;
+        const [[pkgRow]] = await conn.query(
+          `SELECT id, name, price
+           FROM bar_packages
+           WHERE bar_id = ? AND deleted_at IS NULL AND (id = ? OR LOWER(name) = LOWER(?))
+           ORDER BY id DESC
+           LIMIT 1`,
+          [reservation.bar_id, Number(pkg.package_id || 0), pkg.name]
+        );
+        if (!pkgRow?.id) continue;
+
+        lineItems.push({
+          item_type: "package",
+          item_name: pkgRow.name,
+          quantity: Number(pkg.quantity || 1),
+          unit_price: Number(pkgRow.price || 0),
+          line_total: Number(pkgRow.price || 0) * Number(pkg.quantity || 1),
+          metadata: {
+            reservation_id: reservation.id,
+            package_id: pkgRow.id,
+          },
+        });
+        coveredNames.add(String(pkgRow.name || '').toLowerCase().trim());
       }
     }
   } else {
     // Fallback: parse from notes if reservation_items table doesn't exist
+    const coveredNames = new Set();
     const parsedItems = parseReservationOrderItems(reservation.notes);
     for (const it of parsedItems) {
       const [menuRows] = await conn.query(
@@ -187,6 +375,33 @@ async function buildReservationLineItems(conn, reservation) {
         line_total: unitPrice * Number(it.quantity || 1),
         metadata: {
           reservation_id: reservation.id,
+        },
+      });
+      coveredNames.add(it.name.toLowerCase().trim());
+    }
+
+    const parsedPackages = parseReservationPackageItems(reservation.notes);
+    for (const pkg of parsedPackages) {
+      if (coveredNames.has(pkg.name.toLowerCase().trim())) continue;
+      const [[pkgRow]] = await conn.query(
+        `SELECT id, name, price
+         FROM bar_packages
+         WHERE bar_id = ? AND deleted_at IS NULL AND (id = ? OR LOWER(name) = LOWER(?))
+         ORDER BY id DESC
+         LIMIT 1`,
+        [reservation.bar_id, Number(pkg.package_id || 0), pkg.name]
+      );
+      if (!pkgRow?.id) continue;
+
+      lineItems.push({
+        item_type: "package",
+        item_name: pkgRow.name,
+        quantity: Number(pkg.quantity || 1),
+        unit_price: Number(pkgRow.price || 0),
+        line_total: Number(pkgRow.price || 0) * Number(pkg.quantity || 1),
+        metadata: {
+          reservation_id: reservation.id,
+          package_id: pkgRow.id,
         },
       });
     }
@@ -267,37 +482,127 @@ async function createPayoutForPayment(conn, payment) {
   );
 }
 
-async function deductInventoryForReservation(conn, reservationId) {
+async function deductInventoryForReservation(conn, reservationId, paymentId = null) {
   try {
-    const [riCheck] = await conn.query(
-      `SELECT 1 FROM INFORMATION_SCHEMA.TABLES
-       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'reservation_items' LIMIT 1`
-    );
-    if (!riCheck.length) return;
-
-    const [items] = await conn.query(
-      `SELECT ri.menu_item_id, ri.quantity, m.inventory_item_id
-       FROM reservation_items ri
-       JOIN menu_items m ON m.id = ri.menu_item_id
-       WHERE ri.reservation_id = ? AND m.inventory_item_id IS NOT NULL`,
+    const [[reservation]] = await conn.query(
+      `SELECT bar_id, notes, payment_transaction_id
+       FROM reservations
+       WHERE id = ?
+       LIMIT 1`,
       [reservationId]
     );
+    if (!reservation?.bar_id) return;
 
-    for (const item of items) {
+    const effectivePaymentId = Number(paymentId || reservation.payment_transaction_id || 0) || null;
+    const inventoryTotals = new Map();
+    const coveredNames = new Set();
+    let usedPaymentLineItems = false;
+
+    if (effectivePaymentId && (await hasPaymentLineItemsTable(conn))) {
+      const [paymentItems] = await conn.query(
+        `SELECT item_type, item_name, quantity, metadata
+         FROM payment_line_items
+         WHERE payment_transaction_id = ?
+         ORDER BY id ASC`,
+        [effectivePaymentId]
+      );
+
+      if (paymentItems.length) {
+        usedPaymentLineItems = true;
+        for (const item of paymentItems) {
+          const itemType = String(item.item_type || '').toLowerCase();
+          const itemName = String(item.item_name || '').trim();
+          const qty = Number(item.quantity || 0);
+          const metadata = safeParseJson(item.metadata) || {};
+          if (!qty) continue;
+
+          if (itemType === 'menu') {
+            const inventoryItemId = await resolveMenuInventoryItemId(conn, reservation.bar_id, metadata.menu_item_id, itemName);
+            if (inventoryItemId) {
+              inventoryTotals.set(inventoryItemId, (inventoryTotals.get(inventoryItemId) || 0) + qty);
+            }
+            if (itemName) coveredNames.add(itemName.toLowerCase().trim());
+            continue;
+          }
+
+          if (itemType === 'package') {
+            await appendPackageInventoryDeductions(conn, reservation.bar_id, metadata.package_id, itemName, qty, inventoryTotals, coveredNames);
+            if (itemName) coveredNames.add(itemName.toLowerCase().trim());
+          }
+        }
+      }
+    }
+
+    if (!usedPaymentLineItems) {
+      const [riCheck] = await conn.query(
+        `SELECT 1 FROM INFORMATION_SCHEMA.TABLES
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'reservation_items' LIMIT 1`
+      );
+
+      if (riCheck.length) {
+        const [items] = await conn.query(
+          `SELECT ri.menu_item_id, ri.quantity, COALESCE(m.menu_name, '') AS menu_name, m.inventory_item_id
+           FROM reservation_items ri
+           JOIN menu_items m ON m.id = ri.menu_item_id
+           WHERE ri.reservation_id = ? AND m.inventory_item_id IS NOT NULL`,
+          [reservationId]
+        );
+
+        for (const item of items) {
+          const inventoryItemId = Number(item.inventory_item_id || 0);
+          const qty = Number(item.quantity || 0);
+          if (!inventoryItemId || !qty) continue;
+          inventoryTotals.set(inventoryItemId, (inventoryTotals.get(inventoryItemId) || 0) + qty);
+          if (item.menu_name) coveredNames.add(String(item.menu_name).toLowerCase().trim());
+        }
+      }
+    }
+
+    const parsedItems = parseReservationOrderItems(reservation.notes);
+    for (const item of parsedItems) {
+      const itemName = String(item.name || '').trim();
+      const qty = Number(item.quantity || 0);
+      if (!itemName || !qty || coveredNames.has(itemName.toLowerCase().trim())) continue;
+
+      const inventoryItemId = await resolveMenuInventoryItemId(conn, reservation.bar_id, null, itemName);
+      if (inventoryItemId) {
+        inventoryTotals.set(inventoryItemId, (inventoryTotals.get(inventoryItemId) || 0) + qty);
+        coveredNames.add(itemName.toLowerCase().trim());
+        continue;
+      }
+
+      const matchedPackage = await appendPackageInventoryDeductions(conn, reservation.bar_id, null, itemName, qty, inventoryTotals, coveredNames);
+      if (matchedPackage) {
+        coveredNames.add(itemName.toLowerCase().trim());
+      }
+    }
+
+    const parsedPackages = parseReservationPackageItems(reservation.notes);
+    for (const pkg of parsedPackages) {
+      const packageName = String(pkg.name || '').trim();
+      const qty = Number(pkg.quantity || 0);
+      if (!packageName || !qty || coveredNames.has(packageName.toLowerCase().trim())) continue;
+      const matchedPackage = await appendPackageInventoryDeductions(conn, reservation.bar_id, pkg.package_id, packageName, qty, inventoryTotals, coveredNames);
+      if (matchedPackage) {
+        coveredNames.add(packageName.toLowerCase().trim());
+      }
+    }
+
+    for (const [inventoryItemId, quantity] of inventoryTotals.entries()) {
       const [invRows] = await conn.query(
         "SELECT stock_qty, reorder_level FROM inventory_items WHERE id = ? LIMIT 1",
-        [item.inventory_item_id]
+        [inventoryItemId]
       );
       if (!invRows.length) continue;
 
-      const newStock = Math.max(0, Number(invRows[0].stock_qty) - Number(item.quantity));
+      const newStock = Math.max(0, Number(invRows[0].stock_qty) - Number(quantity));
       let status = "normal";
       if (newStock <= 0) status = "critical";
       else if (newStock < Number(invRows[0].reorder_level || 0)) status = "low";
 
       await conn.query(
         "UPDATE inventory_items SET stock_qty = ?, stock_status = ? WHERE id = ?",
-        [newStock, status, item.inventory_item_id]
+        [newStock, status, inventoryItemId]
       );
     }
   } catch (err) {
@@ -354,6 +659,18 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
   } else if (payment.payment_type === 'reservation') {
     const paidAmount = Number(payment.amount || 0);
     let newPaymentStatus = 'paid'; // safe default
+    let shouldDeductInventory = true;
+
+    try {
+      const [[existingReservation]] = await conn.query(
+        `SELECT payment_status
+         FROM reservations
+         WHERE id = ?
+         LIMIT 1`,
+        [payment.related_id]
+      );
+      shouldDeductInventory = !['partial', 'paid'].includes(String(existingReservation?.payment_status || '').toLowerCase());
+    } catch (_) {}
 
     try {
       // Compute total from tables + reservation_items; fallback to payment_line_items
@@ -473,7 +790,9 @@ async function markPaymentSuccess(conn, payment, paymongoPaymentId = null) {
       }
     }
 
-    await deductInventoryForReservation(conn, payment.related_id);
+    if (shouldDeductInventory) {
+      await deductInventoryForReservation(conn, payment.related_id, payment.id);
+    }
   }
 
   await createPayoutForPayment(conn, payment);
@@ -1056,3 +1375,4 @@ router.get("/:reference_id", requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.deductInventoryForReservation = deductInventoryForReservation;

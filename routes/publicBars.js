@@ -36,6 +36,7 @@ router.get("/bars/:barId/menu-with-bestsellers", async (req, res) => {
             m.menu_description,
             m.selling_price,
             i.image_path,
+            i.stock_qty,
             COALESCE(SUM(ri.quantity), 0) AS total_sold,
             CASE WHEN COALESCE(SUM(ri.quantity), 0) > 0
               THEN RANK() OVER (PARTITION BY m.bar_id ORDER BY COALESCE(SUM(ri.quantity), 0) DESC)
@@ -46,7 +47,7 @@ router.get("/bars/:barId/menu-with-bestsellers", async (req, res) => {
            JOIN inventory_items i ON i.id = m.inventory_item_id
            LEFT JOIN reservation_items ri ON ri.menu_item_id = m.id
            WHERE m.bar_id = ? AND m.is_available = 1 AND COALESCE(i.stock_qty, 0) > 0
-           GROUP BY m.id, m.menu_name, m.category, m.menu_description, m.selling_price, i.image_path
+           GROUP BY m.id, m.menu_name, m.category, m.menu_description, m.selling_price, i.image_path, i.stock_qty
            ORDER BY total_sold DESC, m.sort_order ASC, m.menu_name`
         : `SELECT 
             m.id,
@@ -55,6 +56,7 @@ router.get("/bars/:barId/menu-with-bestsellers", async (req, res) => {
             m.menu_description,
             m.selling_price,
             i.image_path,
+            i.stock_qty,
             0 AS is_best_seller,
             0 AS total_sold,
             999 AS sales_rank
@@ -480,7 +482,7 @@ router.get("/bars/:id/packages", async (req, res) => {
       [barId]
     );
 
-    // Fetch inclusions for each package
+    // Fetch inclusions for each package and check stock availability
     for (const pkg of packages) {
       const [inclusions] = await pool.query(
         `SELECT id, item_name, quantity
@@ -490,6 +492,41 @@ router.get("/bars/:id/packages", async (req, res) => {
         [pkg.id]
       );
       pkg.inclusions = inclusions;
+      
+      // Check if all items are in stock
+      pkg.is_available = true;
+      pkg.unavailable_reason = null;
+      let maxPackageQty = null;
+      
+      for (const item of inclusions) {
+        // Try to find matching inventory item by name
+        const [stockCheck] = await pool.query(
+          `SELECT i.name, i.stock_qty, m.menu_name
+           FROM inventory_items i
+           LEFT JOIN menu_items m ON m.inventory_item_id = i.id AND m.bar_id = ?
+           WHERE i.bar_id = ? AND (i.name = ? OR m.menu_name = ?)
+           LIMIT 1`,
+          [barId, barId, item.item_name, item.item_name]
+        );
+        
+        if (stockCheck.length > 0) {
+          const stock = Number(stockCheck[0].stock_qty || 0);
+          const inclusionQty = Math.max(1, Number(item.quantity || 1));
+          const packageUnitsFromThisItem = Math.floor(stock / inclusionQty);
+          maxPackageQty = maxPackageQty === null ? packageUnitsFromThisItem : Math.min(maxPackageQty, packageUnitsFromThisItem);
+          if (packageUnitsFromThisItem <= 0) {
+            pkg.is_available = false;
+            pkg.unavailable_reason = `${item.item_name} is currently out of stock`;
+            break;
+          }
+        }
+      }
+
+      pkg.stock_qty = Math.max(0, Number(maxPackageQty ?? 0));
+      if (pkg.is_available && inclusions.length > 0 && pkg.stock_qty <= 0) {
+        pkg.is_available = false;
+        pkg.unavailable_reason = 'Package is currently out of stock';
+      }
     }
 
     return res.json({ success: true, data: packages });
