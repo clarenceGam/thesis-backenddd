@@ -712,7 +712,17 @@ router.post("/:reference_id/confirm", requireAuth, async (req, res) => {
 
     const payment = rows[0];
     if (payment.status === 'paid') {
+      await conn.beginTransaction();
+      await markPaymentSuccess(conn, payment, payment.paymongo_payment_id || null);
+      await conn.commit();
       return res.json({ success: true, message: "Payment already confirmed", data: { status: 'paid', reference_id } });
+    }
+
+    if (payment.status === 'cancelled' || payment.status === 'failed') {
+      await conn.beginTransaction();
+      await markPaymentFailed(conn, payment, payment.failed_reason || 'Payment cancelled');
+      await conn.commit();
+      return res.json({ success: false, message: 'Payment cancelled', data: { status: 'cancelled', reference_id } });
     }
 
     await paymongoService.loadKeys();
@@ -733,7 +743,6 @@ router.post("/:reference_id/confirm", requireAuth, async (req, res) => {
           externalStatus = 'paid';
         } catch (attachErr) {
           console.warn('Attach source error (may already be consumed):', attachErr.message);
-          // If source is not chargeable anymore, check if it's because it was already paid
           if (attachErr.message?.includes('not chargeable')) {
             externalStatus = source?.attributes?.status === 'consumed' ? 'paid' : externalStatus;
           } else {
@@ -741,7 +750,6 @@ router.post("/:reference_id/confirm", requireAuth, async (req, res) => {
           }
         }
       } else if (externalStatus === 'consumed' || externalStatus === 'paid') {
-        // Source already consumed/paid via webhook or previous confirm
         externalStatus = 'paid';
       }
     } else if (payment.paymongo_payment_intent_id) {
@@ -869,7 +877,7 @@ router.get("/my/history", requireAuth, async (req, res) => {
               pt.paid_at, pt.created_at, pt.failed_reason,
               b.id AS bar_id, b.name AS bar_name,
               r.transaction_number, r.reservation_date, r.reservation_time, r.party_size, r.notes AS reservation_notes,
-              r.status AS reservation_status,
+              r.status AS reservation_status, r.payment_status AS reservation_payment_status,
               COALESCE(rt.table_number, ot.table_number) AS table_number,
               o.order_number, o.status AS order_status
        FROM payment_transactions pt

@@ -246,48 +246,59 @@ async function handleOrderPaymentPaid(payment) {
  * Process paid reservation
  */
 async function handleReservationPaymentPaid(payment) {
-  // Compute total from tables + reservation_items; fallback to payment_line_items; otherwise use deposit
-  const [[tableSumRow]] = await pool.query(
-    `SELECT COALESCE(SUM(bt.price), 0) AS table_total
-     FROM reservation_tables rt
-     JOIN bar_tables bt ON bt.id = rt.table_id
-     WHERE rt.reservation_id = ?`,
-    [payment.related_id]
-  );
-  const tableTotal = Number(tableSumRow?.table_total || 0);
-
-  const [[itemSumRow]] = await pool.query(
-    `SELECT COALESCE(SUM(ri.quantity * ri.unit_price), 0) AS items_total
-     FROM reservation_items ri
-     WHERE ri.reservation_id = ?`,
-    [payment.related_id]
-  );
-  const itemsTotal = Number(itemSumRow?.items_total || 0);
-
-  let computedTotal = tableTotal + itemsTotal;
-
-  // Always consider payment_line_items total (captures full order breakdown from checkout)
-  let pliTotal = 0;
-  if (payment.id) {
-    const [[pliSumRow]] = await pool.query(
-      `SELECT COALESCE(SUM(line_total), 0) AS pli_total
-       FROM payment_line_items
-       WHERE payment_transaction_id = ?`,
-      [payment.id]
-    );
-    pliTotal = Number(pliSumRow?.pli_total || 0);
-  }
-  computedTotal = Math.max(computedTotal, pliTotal);
-
-  const [[resRow]] = await pool.query(
-    `SELECT deposit_amount FROM reservations WHERE id = ? LIMIT 1`,
-    [payment.related_id]
-  );
-
   const paidAmount = Number(payment.amount || 0);
-  const depositAmount = Number(resRow?.deposit_amount || 0);
-  const targetTotal = computedTotal > 0 ? computedTotal : depositAmount;
-  const newPaymentStatus = targetTotal > 0 && paidAmount < targetTotal ? 'partial' : 'paid';
+  let newPaymentStatus = 'paid';
+
+  try {
+    let tableTotal = 0;
+    try {
+      const [[tableSumRow]] = await pool.query(
+        `SELECT COALESCE(SUM(bt.price), 0) AS table_total
+         FROM reservation_tables rt
+         JOIN bar_tables bt ON bt.id = rt.table_id
+         WHERE rt.reservation_id = ?`,
+        [payment.related_id]
+      );
+      tableTotal = Number(tableSumRow?.table_total || 0);
+    } catch (_) {}
+
+    let itemsTotal = 0;
+    try {
+      const [[itemSumRow]] = await pool.query(
+        `SELECT COALESCE(SUM(ri.quantity * ri.unit_price), 0) AS items_total
+         FROM reservation_items ri
+         WHERE ri.reservation_id = ?`,
+        [payment.related_id]
+      );
+      itemsTotal = Number(itemSumRow?.items_total || 0);
+    } catch (_) {}
+
+    let computedTotal = tableTotal + itemsTotal;
+
+    try {
+      const [[pliSumRow]] = await pool.query(
+        `SELECT COALESCE(SUM(line_total), 0) AS pli_total
+         FROM payment_line_items
+         WHERE payment_transaction_id = ?`,
+        [payment.id]
+      );
+      computedTotal = Math.max(computedTotal, Number(pliSumRow?.pli_total || 0));
+    } catch (_) {}
+
+    let depositAmount = 0;
+    try {
+      const [[resRow]] = await pool.query(
+        `SELECT deposit_amount FROM reservations WHERE id = ? LIMIT 1`,
+        [payment.related_id]
+      );
+      depositAmount = Number(resRow?.deposit_amount || 0);
+    } catch (_) {}
+
+    const targetTotal = computedTotal > 0 ? computedTotal : depositAmount;
+    newPaymentStatus = targetTotal > 0 && paidAmount < targetTotal ? 'partial' : 'paid';
+  } catch (err) {
+    console.error('HANDLE_RESERVATION_PAYMENT_PAID_ERR:', err.message);
+  }
 
   await pool.query(
     "UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?",

@@ -246,9 +246,26 @@ async function updateOrder(payment) {
  * Update reservation status
  */
 async function updateReservation(payment) {
-  await pool.query("UPDATE reservations SET payment_status = 'paid', status = 'confirmed', paid_at = NOW() WHERE id = ?", [payment.related_id]);
+  const paidAmount = Number(payment.amount || 0);
+  let newPaymentStatus = 'paid';
+  try {
+    const [[resRow]] = await pool.query(
+      `SELECT COALESCE(t.price, 0) + COALESCE((
+         SELECT SUM(ri.quantity * ri.unit_price) FROM reservation_items ri WHERE ri.reservation_id = r.id
+       ), 0) AS total_amount
+       FROM reservations r
+       LEFT JOIN bar_tables t ON t.id = r.table_id
+       WHERE r.id = ? LIMIT 1`,
+      [payment.related_id]
+    );
+    const totalAmount = Number(resRow?.total_amount || 0);
+    newPaymentStatus = totalAmount > 0 && paidAmount < totalAmount ? 'partial' : 'paid';
+  } catch (err) {
+    console.error('PAYMENT_CHECK_UPDATE_RESERVATION_ERR:', err.message);
+  }
+  await pool.query("UPDATE reservations SET payment_status = ?, status = 'confirmed', paid_at = NOW() WHERE id = ?", [newPaymentStatus, payment.related_id]);
   await createPayout(payment);
-  console.log(`✅ Reservation ${payment.related_id} marked as CONFIRMED (payment paid)`);
+  console.log(`✅ Reservation ${payment.related_id} marked as CONFIRMED (payment ${newPaymentStatus})`);
 }
 
 async function createPayout(payment) {
