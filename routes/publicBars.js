@@ -178,7 +178,8 @@ router.get("/bars", async (req, res) => {
               b.latitude, b.longitude, b.rating, b.review_count,
               (SELECT COUNT(*) FROM bar_followers bf WHERE bf.bar_id = b.id) AS follower_count,
               b.monday_hours, b.tuesday_hours, b.wednesday_hours,
-              b.thursday_hours, b.friday_hours, b.saturday_hours, b.sunday_hours
+              b.thursday_hours, b.friday_hours, b.saturday_hours, b.sunday_hours,
+              b.bar_types
        FROM bars b
        WHERE ${where.join(" AND ")}
        ORDER BY b.name ASC`,
