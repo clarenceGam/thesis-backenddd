@@ -131,6 +131,44 @@ async function hasReservationTimeLimitColumns() {
   return _hasReservationTimeLimitColumnsCache;
 }
 
+let _hasBarTypesColumnCache = null;
+async function hasBarTypesColumn() {
+  if (_hasBarTypesColumnCache !== null) return _hasBarTypesColumnCache;
+  try {
+    const [rows] = await pool.query(
+      `SELECT 1
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'bars'
+         AND COLUMN_NAME = 'bar_types'
+       LIMIT 1`
+    );
+    _hasBarTypesColumnCache = rows.length > 0;
+  } catch (_) {
+    _hasBarTypesColumnCache = false;
+  }
+  return _hasBarTypesColumnCache;
+}
+
+let _hasBarStaffTypesColumnCache = null;
+async function hasBarStaffTypesColumn() {
+  if (_hasBarStaffTypesColumnCache !== null) return _hasBarStaffTypesColumnCache;
+  try {
+    const [rows] = await pool.query(
+      `SELECT 1
+       FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'bars'
+         AND COLUMN_NAME = 'staff_types'
+       LIMIT 1`
+    );
+    _hasBarStaffTypesColumnCache = rows.length > 0;
+  } catch (_) {
+    _hasBarStaffTypesColumnCache = false;
+  }
+  return _hasBarStaffTypesColumnCache;
+}
+
 let _hasUserStaffTypeColumnCache = null;
 async function hasUserStaffTypeColumn() {
   if (_hasUserStaffTypeColumnCache !== null) return _hasUserStaffTypeColumnCache;
@@ -167,6 +205,7 @@ function parseJsonArray(value) {
 }
 
 async function getBarStaffTypes(barId) {
+  if (!(await hasBarStaffTypesColumn())) return [];
   const [[barRow]] = await pool.query(
     `SELECT staff_types
      FROM bars
@@ -728,6 +767,8 @@ router.get(
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
       const includeReservationMode = await hasReservationModeColumn();
+      const includeBarTypes = await hasBarTypesColumn();
+      const includeStaffTypes = await hasBarStaffTypesColumn();
       let includeTimeLimits = false;
       try {
         includeTimeLimits = await hasReservationTimeLimitColumns();
@@ -737,9 +778,11 @@ router.get(
       const reservationModeSelect = includeReservationMode
         ? ", reservation_mode"
         : ", 'manual_approval' AS reservation_mode";
+      const staffTypesSelect = includeStaffTypes ? ", staff_types" : ", NULL AS staff_types";
+      const barTypesSelect = includeBarTypes ? ", bar_types" : ", NULL AS bar_types";
       const timeLimitSelect = includeTimeLimits
-        ? ", bar_types, reservation_time_limit_mode, reservation_time_limit_minutes"
-        : ", NULL AS bar_types, NULL AS reservation_time_limit_mode, NULL AS reservation_time_limit_minutes";
+        ? ` ${barTypesSelect}, reservation_time_limit_mode, reservation_time_limit_minutes`
+        : `${barTypesSelect}, NULL AS reservation_time_limit_mode, NULL AS reservation_time_limit_minutes`;
 
       const [rows] = await pool.query(
         `SELECT id, name, description, address, city, state, zip_code,
@@ -752,7 +795,7 @@ router.get(
                 friday_hours, saturday_hours, sunday_hours,
                 accept_cash_payment, accept_online_payment, accept_gcash,
                 gcash_number, gcash_account_name,
-                minimum_reservation_deposit, staff_types${reservationModeSelect}${timeLimitSelect},
+                minimum_reservation_deposit${staffTypesSelect}${reservationModeSelect}${timeLimitSelect},
                 status, rating, review_count, created_at, updated_at
          FROM bars
          WHERE id = ? LIMIT 1`,
@@ -780,6 +823,8 @@ router.patch(
       if (!barId) return res.status(400).json({ success: false, message: "No bar_id on account" });
 
       const includeReservationMode = await hasReservationModeColumn();
+      const includeBarTypes = await hasBarTypesColumn();
+      const includeStaffTypes = await hasBarStaffTypesColumn();
       let includeTimeLimits = false;
       try {
         includeTimeLimits = await hasReservationTimeLimitColumns();
@@ -796,9 +841,10 @@ router.patch(
         "friday_hours", "saturday_hours", "sunday_hours",
         "accept_cash_payment", "accept_online_payment", "accept_gcash",
         "minimum_reservation_deposit",
-        "gcash_number", "gcash_account_name",
-        "staff_types", "bar_types"
+        "gcash_number", "gcash_account_name"
       ];
+      if (includeStaffTypes) allowed.push("staff_types");
+      if (includeBarTypes) allowed.push("bar_types");
       if (includeReservationMode) allowed.push("reservation_mode");
       if (includeTimeLimits) allowed.push("reservation_time_limit_mode", "reservation_time_limit_minutes");
 
@@ -853,9 +899,11 @@ router.patch(
       const reservationModeSelect = includeReservationMode
         ? ", reservation_mode"
         : ", 'manual_approval' AS reservation_mode";
+      const updatedStaffTypesSelect = includeStaffTypes ? ", staff_types" : ", NULL AS staff_types";
+      const updatedBarTypesSelect = includeBarTypes ? ", bar_types" : ", NULL AS bar_types";
       const updatedTimeLimitSelect = includeTimeLimits
-        ? ", reservation_time_limit_mode, reservation_time_limit_minutes"
-        : ", NULL AS reservation_time_limit_mode, NULL AS reservation_time_limit_minutes";
+        ? `${updatedBarTypesSelect}, reservation_time_limit_mode, reservation_time_limit_minutes`
+        : `${updatedBarTypesSelect}, NULL AS reservation_time_limit_mode, NULL AS reservation_time_limit_minutes`;
       const [updated] = await pool.query(
         `SELECT id, name, description, address, city, state, zip_code,
                 phone, contact_number, email, website, category, price_range,
@@ -867,7 +915,7 @@ router.patch(
                 friday_hours, saturday_hours, sunday_hours,
                 accept_cash_payment, accept_online_payment, accept_gcash,
                 gcash_number, gcash_account_name,
-                minimum_reservation_deposit, staff_types, bar_types${reservationModeSelect}${updatedTimeLimitSelect},
+                minimum_reservation_deposit${updatedStaffTypesSelect}${reservationModeSelect}${updatedTimeLimitSelect},
                 status, updated_at
          FROM bars WHERE id = ? LIMIT 1`,
         [barId]

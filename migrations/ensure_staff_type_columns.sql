@@ -8,7 +8,7 @@ SET @bars_staff_types_exists := (
 
 SET @bars_staff_types_sql := IF(
   @bars_staff_types_exists = 0,
-  'ALTER TABLE `bars` ADD COLUMN `staff_types` JSON DEFAULT NULL AFTER `bar_types`',
+  'ALTER TABLE `bars` ADD COLUMN `staff_types` JSON DEFAULT NULL',
   'SELECT 1'
 );
 
